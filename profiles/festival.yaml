@@ -1,0 +1,55 @@
+# Festival deployment profile
+#
+# A profile answers "where am I and what do I care about." It is config, not code.
+# Fields the software cannot read (antenna, attenuator) are recorded anyway — six months
+# from now, "why is this run 10 dB down on that one" should be answered by this file
+# rather than by memory.
+#
+# Numeric underscores parse correctly under PyYAML (YAML 1.1). If this ever moves to a
+# YAML 1.2 parser, they become strings — drop them then.
+
+name: festival
+description: FRS, GMRS, Part 90 business, plus 2 m and 70 cm ham
+
+receivers:
+
+  uhf:
+    serial: null                  # TODO Phase 1: airspy_info / SoapySDRUtil --find
+    mode: parked
+    center_hz: 466_000_000
+    sample_rate: 10_000_000
+    gain: 12                      # TODO Phase 1: set from measured noise floor sweep
+    ppm: 0.0                      # TODO Phase 1: measure against a known reference
+    attenuator_db: 20             # physically fitted, not software-controlled
+    antenna: null                 # TODO: record what is actually screwed on
+    usb_bus: null                 # TODO: must differ from vhf — confirm with lsusb -t
+
+  vhf:
+    serial: null                  # TODO Phase 5
+    mode: rotating
+    dwell_seconds: 180
+    sample_rate: 10_000_000
+    gain: 12                      # TODO Phase 5
+    ppm: 0.0                      # TODO Phase 5
+    attenuator_db: 20
+    antenna: null
+    usb_bus: null
+    windows:
+      - {center_hz: 446_000_000, label: "70cm ham"}
+      - {center_hz: 146_000_000, label: "2m ham"}
+      - {center_hz: 153_200_000, label: "MURS + VHF business"}
+
+# Thresholds below are set from synthetic signals and are provisional.
+# Do not tune them until there are real signals to tune against.
+detection:
+  on_db: 10.0
+  off_db: 6.0
+  min_duration_s: 0.12
+  hang_s: 0.30
+
+storage:
+  db_path: data/survey.sqlite
+  audio_retention_days: 30
+  iq_retention_days: 7          # largest and least valuable — delete first
+  spectrum_retention_days: 90
+  metadata_retention_days: null # never delete
