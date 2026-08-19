@@ -22,7 +22,9 @@ import sqlite3
 import subprocess
 import time
 
-SCHEMA_VERSION = 2
+import migrate
+
+SCHEMA_VERSION = 4
 SCHEMA_PATH = pathlib.Path(__file__).with_name("schema.sql")
 
 
@@ -41,19 +43,38 @@ def connect(path: str, *, readonly: bool = False) -> sqlite3.Connection:
     return db
 
 
+def _read_version(db: sqlite3.Connection) -> int | None:
+    try:
+        row = db.execute(
+            "SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+        return int(row[0]) if row else None
+    except sqlite3.Error:
+        return None  # schema_meta does not exist yet — fresh database
+
+
 def init_schema(path: str) -> None:
-    """Create the database if absent. Safe to call on an existing one."""
+    """Create or upgrade the database. Safe to call on an existing one.
+
+    schema.sql describes a fresh database and stamps its own version. Running it
+    against an already-migrated database would stamp that older version back and
+    make the migration runner replay steps that have already happened, so the
+    prior version is read first and restored afterwards.
+    """
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = connect(path)
     try:
+        prior = _read_version(db)
         db.executescript(SCHEMA_PATH.read_text())
-        found = db.execute(
-            "SELECT value FROM schema_meta WHERE key = 'version'"
-        ).fetchone()[0]
-        if int(found) != SCHEMA_VERSION:
+        if prior is not None:
+            db.execute(
+                "INSERT OR REPLACE INTO schema_meta (key,value) VALUES ('version',?)",
+                (str(prior),))
+        migrate.apply(db, SCHEMA_VERSION)
+
+        found = _read_version(db)
+        if found != SCHEMA_VERSION:
             raise RuntimeError(
-                f"{path} is schema v{found}, this code expects v{SCHEMA_VERSION}"
-            )
+                f"{path} is schema v{found}, this code expects v{SCHEMA_VERSION}")
     finally:
         db.close()
 
@@ -127,11 +148,15 @@ def log_event(db: sqlite3.Connection, run_id: int, receiver_id: str, **kw) -> in
         "t_start", "t_end", "duration_s", "freq_hz", "freq_raw_hz", "bandwidth_hz",
         "peak_dbfs", "noise_dbfs", "snr_db", "modulation", "content",
         "ctcss_hz", "dcs_code", "dcs_polarity", "confidence",
-        "audio_path", "iq_path", "channel_id",
+        "audio_path", "iq_path", "channel_id", "band_plan_id", "tone_state",
     }
     unknown = set(kw) - allowed
     if unknown:
         raise ValueError(f"not event columns: {sorted(unknown)}")
+    ts = kw.get("tone_state")
+    if ts is not None and ts not in migrate.TONE_STATES:
+        raise ValueError(
+            f"tone_state must be one of {migrate.TONE_STATES}, got {ts!r}")
     for k, v in kw.items():
         if v is not None:
             cols.append(k)

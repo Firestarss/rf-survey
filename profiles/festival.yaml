@@ -62,3 +62,12 @@ storage:
 # pair falls outside every window above. Reaching it needs a fourth rotation window
 # near 454 MHz, which costs dwell time on the three that exist. Revisit after the
 # first real deployment shows whether that band is busy.
+
+# Which services you may legally transmit on. Drives tier 4 — a channel you cannot
+# key up on is not "contactable" however completely it has been characterised.
+# Unlicensed services (FRS, MURS) always count and need not be listed here.
+# Valid names match band_plan.service: ham2m, ham70cm, gmrs, part90.
+# FRS needs no licence — it is licensed by rule — so it is never listed here and
+# always counts. Only services requiring a licence go in this list.
+operator:
+  licences: [gmrs]              # TODO: add ham2m, ham70cm once your ticket is confirmed

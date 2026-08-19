@@ -24,7 +24,7 @@ SELECT *,
        ABS(COALESCE(freq_center_hz, (freq_lo_hz + freq_hi_hz) / 2) - :f) AS offset_hz
 FROM band_plan
 WHERE :f BETWEEN freq_lo_hz AND freq_hi_hz
-ORDER BY width_hz ASC, offset_hz ASC
+ORDER BY width_hz ASC, offset_hz ASC, licensed ASC, service ASC
 """
 
 
@@ -34,9 +34,27 @@ def lookup(conn: sqlite3.Connection, freq_hz: int) -> list[sqlite3.Row]:
 
 
 def best(conn: sqlite3.Connection, freq_hz: int) -> sqlite3.Row | None:
-    """The single most specific match, or None if the frequency is unallocated."""
+    """The single most specific match, or None if the frequency is unallocated.
+
+    Ties are broken toward the unlicensed service, then alphabetically, so the
+    answer is stable across runs. 462.675 is both FRS 20 and GMRS 20; returning
+    FRS is the more useful half of the truth, because it is the one anybody may
+    transmit on. Use tied_best() when you need to know it was shared.
+    """
     rows = lookup(conn, freq_hz)
     return rows[0] if rows else None
+
+
+def tied_best(conn: sqlite3.Connection, freq_hz: int) -> list[sqlite3.Row]:
+    """Every match as specific as the best one — co-equal, not ranked.
+
+    More than one row here is real shared allocation, not ambiguity to resolve.
+    """
+    rows = lookup(conn, freq_hz)
+    if not rows:
+        return []
+    top = rows[0]["width_hz"]
+    return [r for r in rows if r["width_hz"] == top]
 
 
 def describe(conn: sqlite3.Connection, freq_hz: int) -> str:
