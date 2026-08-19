@@ -67,3 +67,17 @@ Deliberately left there rather than forced to Gen3.
 
 Waiting on Airspy R2 delivery. Procedure in `docs/phase1-detail.md`.
 Record on completion: **serial, firmware version, gain setting, ppm error.**
+
+The deck now records its own evidence for two of those. The serial is read back off the
+device and stored in `run_receivers.serial`, so a run states which radio produced it
+rather than which one was asked for. And every analysed event stores `freq_raw_hz`, the
+measured centre before it is snapped to the 6.25 kHz grid — so ppm error is a query
+against a known transmitter rather than a separate measurement:
+
+```sql
+SELECT ROUND(AVG(freq_raw_hz - freq_hz), 1) AS mean_error_hz,
+       ROUND(AVG(freq_raw_hz - freq_hz) / (freq_hz / 1e6), 3) AS ppm
+FROM events WHERE freq_hz = <the known transmitter> AND freq_raw_hz IS NOT NULL;
+```
+
+Both are untested against hardware. Nothing here has seen a real signal.
