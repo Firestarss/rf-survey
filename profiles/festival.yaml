@@ -70,4 +70,4 @@ storage:
 # FRS needs no licence — it is licensed by rule — so it is never listed here and
 # always counts. Only services requiring a licence go in this list.
 operator:
-  licences: [gmrs]              # TODO: add ham2m, ham70cm once your ticket is confirmed
+  licences: [gmrs, ham2m, ham70cm]
