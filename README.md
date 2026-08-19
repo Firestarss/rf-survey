@@ -36,7 +36,7 @@ tools/deck-check.sh                            # soak and diagnostics
 ## Current state
 
 Phase 0 **PASS** (2026-08-18). Phase 1 blocked on Airspy delivery.
-See `tools/phase-log.md` for the gate tracker.
+See `docs/phase_log.md` for the gate tracker.
 
 ## Conventions
 
