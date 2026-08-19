@@ -16,7 +16,7 @@ receivers:
   uhf:
     serial: null                  # TODO Phase 1: airspy_info / SoapySDRUtil --find
     mode: parked
-    center_hz: 466_000_000
+    center_hz: 466_000_000        # covers 461–471: all FRS, GMRS, UHF dots and stars
     sample_rate: 10_000_000
     gain: 12                      # TODO Phase 1: set from measured noise floor sweep
     ppm: 0.0                      # TODO Phase 1: measure against a known reference
@@ -37,7 +37,11 @@ receivers:
     windows:
       - {center_hz: 446_000_000, label: "70cm ham"}
       - {center_hz: 146_000_000, label: "2m ham"}
-      - {center_hz: 153_200_000, label: "MURS + VHF business"}
+      # 154.950 is the midpoint of 151.505–158.400, the full span of VHF business
+      # and MURS channels. Covers all 14 even at a conservative 8.5 MHz usable
+      # bandwidth, with 800 kHz of edge margin. Nothing sits on the centre itself.
+      # Was 153.200, which missed the 158.400 itinerant by 200 kHz.
+      - {center_hz: 154_950_000, label: "MURS + VHF business"}
 
 # Thresholds below are set from synthetic signals and are provisional.
 # Do not tune them until there are real signals to tune against.
@@ -53,3 +57,8 @@ storage:
   iq_retention_days: 7          # largest and least valuable — delete first
   spectrum_retention_days: 90
   metadata_retention_days: null # never delete
+
+# Known gap, deliberately accepted for now: the 451.800/456.800 itinerant repeater
+# pair falls outside every window above. Reaching it needs a fourth rotation window
+# near 454 MHz, which costs dwell time on the three that exist. Revisit after the
+# first real deployment shows whether that band is busy.

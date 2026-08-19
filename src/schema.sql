@@ -1,4 +1,9 @@
--- rfsurvey schema v1
+-- rfsurvey schema v2
+--
+-- Changed from v1: band_plan stores frequency RANGES, not single frequencies.
+-- A discrete channel is a narrow range; a ham band segment is a wide one. Lookup is
+-- one containment query for both, and the match tolerance lives in the data where it
+-- can be seen and tuned, rather than as a magic number inside the enricher.
 --
 -- Conventions:
 --   Frequencies are INTEGER Hz. Never floats — 466.0 MHz must round-trip exactly.
@@ -40,21 +45,41 @@ CREATE TABLE IF NOT EXISTS run_receivers (
 );
 
 -- ---------------------------------------------------------------------------
--- Reference data: static band plan, seeded from a file, not observed
+-- Reference data: seeded from a file, not observed.
+--
+-- Every row is a range. `kind` says which sort:
+--   'channel'  narrow, has a nominal centre you could program into a radio
+--   'segment'  wide, a band plan allocation with no single frequency
+--
+-- Lookup returns every range containing the measured frequency, narrowest first,
+-- so specific beats general: 146.520 -> "National FM simplex calling", while
+-- 146.470 falls through to "2 m simplex" from the wider segment containing it.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS band_plan (
     id              INTEGER PRIMARY KEY,
-    freq_hz         INTEGER NOT NULL,
+    freq_lo_hz      INTEGER NOT NULL,   -- inclusive
+    freq_hi_hz      INTEGER NOT NULL,   -- inclusive
+    freq_center_hz  INTEGER,            -- nominal; NULL for segments
+    bandwidth_hz    INTEGER,            -- authorised; NULL for segments
     service         TEXT    NOT NULL,   -- 'frs','gmrs','murs','part90','ham2m','ham70cm'
-    label           TEXT    NOT NULL,   -- 'FRS 1', 'GMRS RPT 15', '2m simplex calling'
+    label           TEXT    NOT NULL,
     channel_number  TEXT,
+    kind            TEXT    NOT NULL CHECK (kind IN ('channel','segment')),
     is_repeater_out INTEGER NOT NULL DEFAULT 0 CHECK (is_repeater_out IN (0,1)),
-    pair_offset_hz  INTEGER,            -- +/- offset to the input, NULL if simplex
+    pair_offset_hz  INTEGER,            -- +/- offset to the paired frequency
     licensed        INTEGER NOT NULL DEFAULT 1 CHECK (licensed IN (0,1)),
+    source          TEXT,               -- 'FCC 95B', 'ARRL', 'NESMC', ...
     notes           TEXT,
-    UNIQUE (freq_hz, service)
+    CHECK (freq_hi_hz > freq_lo_hz),
+    CHECK (freq_center_hz IS NULL
+           OR freq_center_hz BETWEEN freq_lo_hz AND freq_hi_hz),
+    CHECK (kind = 'segment' OR freq_center_hz IS NOT NULL),
+    UNIQUE (service, label, freq_lo_hz)
 );
+
+CREATE INDEX IF NOT EXISTS idx_band_plan_lo   ON band_plan (freq_lo_hz);
+CREATE INDEX IF NOT EXISTS idx_band_plan_kind ON band_plan (kind, service);
 
 -- ---------------------------------------------------------------------------
 -- Observations: one row per detected transmission. Append-only, never edited.
@@ -69,8 +94,8 @@ CREATE TABLE IF NOT EXISTS events (
     t_end           REAL    NOT NULL,
     duration_s      REAL    NOT NULL,
 
-    freq_hz         INTEGER NOT NULL,   -- ppm-corrected, snapped to channel grid
-    freq_raw_hz     INTEGER,            -- as measured, before correction
+    freq_hz         INTEGER NOT NULL,   -- ppm-corrected, as measured
+    freq_raw_hz     INTEGER,            -- before ppm correction
     bandwidth_hz    INTEGER,
 
     peak_dbfs       REAL,
@@ -88,6 +113,7 @@ CREATE TABLE IF NOT EXISTS events (
     iq_path         TEXT,
 
     channel_id      INTEGER REFERENCES channels(id) ON DELETE SET NULL,
+    band_plan_id    INTEGER REFERENCES band_plan(id) ON DELETE SET NULL,
 
     CHECK (t_end >= t_start),
     CHECK (NOT (ctcss_hz IS NOT NULL AND dcs_code IS NOT NULL))  -- never both
@@ -98,7 +124,6 @@ CREATE INDEX IF NOT EXISTS idx_events_time    ON events (t_start);
 CREATE INDEX IF NOT EXISTS idx_events_channel ON events (channel_id);
 CREATE INDEX IF NOT EXISTS idx_events_run     ON events (run_id, receiver_id);
 
--- Digital decode results, one-to-many against an event
 CREATE TABLE IF NOT EXISTS decodes (
     id              INTEGER PRIMARY KEY,
     event_id        INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -109,7 +134,7 @@ CREATE TABLE IF NOT EXISTS decodes (
     radio_id        TEXT,
     site_id         TEXT,
     is_control      INTEGER NOT NULL DEFAULT 0 CHECK (is_control IN (0,1)),
-    raw             TEXT                -- decoder output, JSON or plain
+    raw             TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_decodes_event ON decodes (event_id);
@@ -122,11 +147,12 @@ CREATE TABLE IF NOT EXISTS channels (
     id              INTEGER PRIMARY KEY,
     freq_hz         INTEGER NOT NULL UNIQUE,
 
-    service         TEXT,               -- from band_plan lookup
+    service         TEXT,
     label           TEXT,
-    modulation      TEXT,               -- modal value across events
+    band_plan_id    INTEGER REFERENCES band_plan(id) ON DELETE SET NULL,
+    modulation      TEXT,
     content         TEXT,
-    ctcss_hz        REAL,               -- modal tone, if consistent
+    ctcss_hz        REAL,
     dcs_code        INTEGER,
     dcs_polarity    TEXT,
 
@@ -150,7 +176,7 @@ CREATE TABLE IF NOT EXISTS pairs (
     output_channel_id   INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
     input_channel_id    INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
     offset_hz           INTEGER NOT NULL,
-    evidence_count      INTEGER NOT NULL DEFAULT 0,   -- correlated keyups observed
+    evidence_count      INTEGER NOT NULL DEFAULT 0,
     median_lag_s        REAL,
     confidence          REAL CHECK (confidence BETWEEN 0 AND 1 OR confidence IS NULL),
     inferred_at         REAL,
@@ -161,7 +187,6 @@ CREATE TABLE IF NOT EXISTS pairs (
 -- Views
 -- ---------------------------------------------------------------------------
 
--- Human-readable event stream. ISO timestamps, MHz, tone as one column.
 CREATE VIEW IF NOT EXISTS v_events AS
 SELECT
     e.id,
@@ -178,12 +203,12 @@ SELECT
         ELSE NULL
     END                                          AS tone,
     printf('%.1f', e.snr_db)                     AS snr,
-    c.label
+    COALESCE(c.label, b.label)                   AS label
 FROM events e
-LEFT JOIN channels c ON c.id = e.channel_id
+LEFT JOIN channels  c ON c.id = e.channel_id
+LEFT JOIN band_plan b ON b.id = e.band_plan_id
 ORDER BY e.t_start;
 
--- What you would actually program into a radio, best channels first.
 CREATE VIEW IF NOT EXISTS v_contactable AS
 SELECT
     printf('%.4f', c.freq_hz / 1e6)             AS mhz,
@@ -208,7 +233,6 @@ LEFT JOIN channels pi ON pi.id = p.input_channel_id
 WHERE c.tier IS NOT NULL
 ORDER BY c.tier DESC, c.total_airtime_s DESC;
 
--- Busiest frequencies regardless of classification. The "what is going on here" query.
 CREATE VIEW IF NOT EXISTS v_activity AS
 SELECT
     printf('%.4f', freq_hz / 1e6)                AS mhz,
@@ -229,4 +253,4 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     key             TEXT PRIMARY KEY,
     value           TEXT NOT NULL
 );
-INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '1');
+INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '2');
