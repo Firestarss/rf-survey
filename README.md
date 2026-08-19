@@ -19,7 +19,9 @@ to program a radio and join the conversation.
 
 ```
 src/         detector and pipeline
+tests/       the test suite (stdlib unittest, no dependencies)
 tools/       diagnostics, soak scripts, phase log
+systemd/     unit file and notes for running unattended
 docs/        design decisions, bring-up plan, RF primer, architecture
 profiles/    deployment configs (antenna + filter + attenuation + band assignments)
 data/        gitignored, disposable
@@ -32,6 +34,29 @@ python3 src/survey_prototype.py --selftest     # no hardware needed
 python3 src/survey_prototype.py --spectrum     # headless PNG + text peak list
 tools/deck-check.sh                            # soak and diagnostics
 ```
+
+The capture loop runs without a radio too, against a synthetic one
+(`src/simradio.py`). This drives detection, analysis, the two-phase write and the
+retune logic end to end:
+
+```bash
+python3 src/survey_prototype.py --simulate 14 --receiver-id uhf
+python3 src/survey_prototype.py --simulate 8 --rate 2.4e6 --receiver-id vhf \
+        --dwell-seconds 6              # rotation across three windows
+```
+
+## Tests
+
+```bash
+bash tools/run-tests.sh                # everything, a couple of minutes on a Pi
+bash tools/run-tests.sh test_enrich    # one module
+RFSURVEY_SKIP_SLOW=1 bash tools/run-tests.sh   # skip the end-to-end capture run
+```
+
+Stdlib `unittest`, no third-party dependencies, because it has to run on the deck.
+The end-to-end module drives the real capture loop against the synthetic radio and
+asserts on the database that comes out; it is the only test that catches the class
+of bug where every part works and the assembly does not.
 
 ## Current state
 

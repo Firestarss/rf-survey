@@ -1,0 +1,62 @@
+[Unit]
+# One instance per receiver: rfsurvey@uhf, rfsurvey@vhf. The instance name is
+# passed straight through as --receiver-id, so it must be one of the names in
+# the profile's `receivers:` map, and it is what every logged row is attributed
+# to. Getting it wrong is silent.
+Description=RF survey deck — %i receiver
+Documentation=file:/home/firestarss/rfsurvey/docs/handoff.md
+
+# The deck runs unattended at a festival with no operator and often no network.
+# Nothing here should wait on the network: it must start and keep logging
+# whether or not WiFi ever associates.
+After=local-fs.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=firestarss
+WorkingDirectory=/home/firestarss/rfsurvey
+
+ExecStart=/usr/bin/python3 src/survey_prototype.py \
+    --receiver-id %i \
+    --profile profiles/festival.yaml \
+    --db data/survey.sqlite \
+    --capture-dir data/captures \
+    --stats
+
+# survey_prototype exits non-zero when the stream stops delivering samples, which
+# is the case that matters: a wedged USB endpoint does not recover in process, so
+# the fix is to exit and let the device re-enumerate on restart. Restart=always
+# rather than on-failure because a clean exit here is also unexpected — under a
+# supervisor there is no such thing as "the survey finished".
+Restart=always
+RestartSec=10
+
+# SIGINT, not SIGTERM: the capture loop installs a SIGINT handler that stops the
+# loop cleanly, closes the in-flight events and the coverage window, and ends the
+# run. SIGTERM would kill it mid-transaction and leave the last window open.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Journald keeps the console output. There is no other operator-visible log, and
+# on a headless deck in a field this is the only way to find out what happened.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rfsurvey-%i
+
+# The database and captures are the entire product of a deployment. Losing them
+# to an OOM kill of the wrong process is not acceptable, so bias the killer away.
+OOMScoreAdjust=-500
+
+# Modest hardening. ProtectSystem=full leaves /home writable, which is where both
+# the repository and the database live. PrivateDevices is deliberately NOT set —
+# it would hide the USB radios, which is the whole point of the service.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

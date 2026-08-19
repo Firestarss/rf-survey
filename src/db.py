@@ -24,7 +24,7 @@ import time
 
 import migrate
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 SCHEMA_PATH = pathlib.Path(__file__).with_name("schema.sql")
 
 
@@ -125,7 +125,11 @@ def register_receiver(db: sqlite3.Connection, run_id: int, receiver_id: str,
     `serial` is the identity. Never pass a device index — USB enumeration order
     changes across reboots and the two radios will silently swap bands.
     """
-    fields = ("firmware", "usb_bus", "gain_db", "ppm_error", "attenuator_db", "antenna")
+    # center_hz is in this list because migration 5 added the column and nothing
+    # wrote it: kwargs not named here are silently dropped, so the centre went
+    # missing with no error and run_receivers reported 0.000 MHz.
+    fields = ("firmware", "usb_bus", "gain_db", "ppm_error", "attenuator_db",
+              "antenna", "center_hz")
     cur = db.execute(
         f"""INSERT INTO run_receivers
             (run_id, receiver_id, serial, sample_rate_hz, {', '.join(fields)})
@@ -134,6 +138,28 @@ def register_receiver(db: sqlite3.Connection, run_id: int, receiver_id: str,
          *(kw.get(f) for f in fields)),
     )
     return cur.lastrowid
+
+
+def open_window(db: sqlite3.Connection, run_id: int, receiver_id: str,
+                center_hz: int, sample_rate_hz: int, label: str | None = None) -> int:
+    """Record that a receiver has started listening to one span.
+
+    A parked receiver opens exactly one of these and closes it at the end. A
+    rotating one opens a new one on every retune, which is the only record of
+    what was and was not being listened to at a given moment.
+    """
+    cur = db.execute(
+        """INSERT INTO coverage_windows
+           (run_id, receiver_id, center_hz, sample_rate_hz, label, t_start)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (run_id, receiver_id, int(center_hz), int(sample_rate_hz), label, time.time()),
+    )
+    return cur.lastrowid
+
+
+def close_window(db: sqlite3.Connection, window_id: int) -> None:
+    db.execute("UPDATE coverage_windows SET t_end = ? WHERE id = ?",
+               (time.time(), window_id))
 
 
 def end_run(db: sqlite3.Connection, run_id: int) -> None:
@@ -147,7 +173,8 @@ def log_event(db: sqlite3.Connection, run_id: int, receiver_id: str, **kw) -> in
     allowed = {
         "t_start", "t_end", "duration_s", "freq_hz", "freq_raw_hz", "bandwidth_hz",
         "peak_dbfs", "noise_dbfs", "snr_db", "modulation", "content",
-        "ctcss_hz", "dcs_code", "dcs_polarity", "confidence",
+        "deviation_hz", "ctcss_hz", "ctcss_dev_hz", "dcs_code", "dcs_polarity",
+        "confidence", "overload", "analyzed_s", "dcs_errors", "window_id",
         "audio_path", "iq_path", "channel_id", "band_plan_id", "tone_state",
     }
     unknown = set(kw) - allowed
