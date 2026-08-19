@@ -14,7 +14,7 @@
 
 MODE="${1:-diag}"
 MINUTES="${2:-10}"
-DB="${DB:-bench.sqlite}"
+DB="${DB:-data/survey.sqlite}"   # the one survey database; there is no bench.sqlite
 
 sep() { printf '\n===== %s =====\n' "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -310,17 +310,37 @@ diag() {
     sqlite3 "$DB" <<'SQL'
 .mode column
 .headers on
-SELECT COUNT(*) AS events, SUM(overload) AS overload_flagged FROM events;
+SELECT (SELECT value FROM schema_meta WHERE key='version') AS schema_v,
+       COUNT(*) AS events,
+       SUM(overload) AS overload_flagged,
+       SUM(t_end IS NULL) AS in_flight
+FROM events;
+SELECT '--- runs ---';
+SELECT r.id, datetime(r.started_at,'unixepoch') AS started,
+       COALESCE(datetime(r.ended_at,'unixepoch'),'open') AS ended,
+       r.profile_name, GROUP_CONCAT(rr.receiver_id||'='||rr.serial,' ') AS receivers
+FROM runs r LEFT JOIN run_receivers rr ON rr.run_id = r.id
+GROUP BY r.id ORDER BY r.id DESC LIMIT 5;
 SELECT '--- busiest channels ---';
 SELECT ROUND(freq_hz/1000000.0, 4) AS mhz, COUNT(*) AS hits,
-       ROUND(AVG(duration_s),2) AS avg_s, ROUND(AVG(peak_snr_db),1) AS avg_snr,
-       ctcss_hz, SUM(dcs_suspected) AS dcs
+       ROUND(AVG(duration_s),2) AS avg_s, ROUND(AVG(snr_db),1) AS avg_snr,
+       ROUND(AVG(deviation_hz),0) AS avg_dev, ctcss_hz,
+       SUM(tone_state='dcs') AS dcs
 FROM events GROUP BY freq_hz ORDER BY hits DESC LIMIT 25;
 SELECT '--- last 15 events ---';
-SELECT id, ROUND(freq_hz/1000000.0,4) AS mhz, ROUND(duration_s,2) AS dur,
-       ROUND(peak_snr_db,1) AS snr, ctcss_hz, ROUND(ctcss_conf,2) AS cap,
-       dcs_suspected AS dcs, overload AS ovl
+SELECT id, ROUND(freq_hz/1000000.0,4) AS mhz,
+       COALESCE(ROUND(duration_s,2),'open') AS dur,
+       ROUND(snr_db,1) AS snr, ROUND(deviation_hz,0) AS dev,
+       ROUND(analyzed_s,2) AS seen, tone_state, ctcss_hz,
+       CASE WHEN dcs_code IS NOT NULL
+            THEN printf('%03d%s', dcs_code, COALESCE(dcs_polarity,'')) END AS dcs,
+       ROUND(confidence,2) AS cap, overload AS ovl,
+       audio_path IS NOT NULL AS wav
 FROM events ORDER BY id DESC LIMIT 15;
+SELECT '--- coverage: what was actually listened to ---';
+SELECT * FROM v_coverage;
+SELECT '--- what you could talk on ---';
+SELECT * FROM v_contactable LIMIT 15;
 SQL
   else
     echo "no database at $DB (set DB=path to point elsewhere)"

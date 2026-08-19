@@ -31,10 +31,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import bandplan  # noqa: E402
 
 # Measured frequencies that match no band plan channel get binned to this grid
-# before becoming a channel. Finer than any real channel spacing, coarse enough
-# to absorb ppm error and FFT bin resolution, so one transmitter does not become
-# three channel rows.
-FREQ_BIN_HZ = 2_500
+# before becoming a channel. This must not be finer than the detector's own
+# channel grid: survey_prototype watches CHANNEL_HZ = 6250 Hz channels and
+# reports the centre of one of them, so a 2500 Hz bin here could only ever
+# subdivide values that were already quantised to 6250 — extra rows, no extra
+# information. It matches the detector deliberately.
+FREQ_BIN_HZ = 6_250
 
 # A repeater retransmits what it hears, so input and output overlap in time with
 # the output starting fractionally later. Anything outside this is coincidence.
@@ -43,14 +45,45 @@ PAIR_MIN_EVIDENCE = 3
 PAIR_MIN_CONFIDENCE = 0.5
 
 # Where one frequency is allotted to two services with different authorised
-# bandwidths — every FRS/GMRS channel from 15 to 22 — measured bandwidth can rule
-# the narrower one out. Occupied bandwidth is a property of the transmission, not
-# of the path, so unlike received power it survives an unknown distance.
+# bandwidths — every FRS/GMRS channel from 15 to 22 — how wide the signal is can
+# rule the narrower service out. That is a property of the transmission, not of
+# the path, so unlike received power it survives an unknown distance.
 #
 # One-sided. Wide rules out the narrow service; narrow rules out nothing, because
 # a GMRS user on a narrowband radio looks exactly like an FRS user.
-BW_EVIDENCE_MARGIN_HZ = 2_000   # must exceed the narrow limit by this to count
-BW_MIN_EVIDENCE = 3             # measurements needed before a label is changed
+#
+# The measurement is peak FM deviation, not occupied bandwidth: the detector has
+# always measured deviation and has never measured bandwidth, so the old
+# bandwidth rule read a column that is NULL on every row the deck produces and
+# silently never fired.
+#
+# Peak deviation limits keyed by the authorised bandwidth the band plan records.
+# 47 CFR caps FRS at 2.5 kHz peak deviation on its 12.5 kHz channels; a 20 or
+# 25 kHz channel is the classic 5 kHz wideband.
+DEVIATION_LIMIT_HZ = {12_500: 2_500, 20_000: 5_000, 25_000: 5_000}
+
+DEV_EVIDENCE_MARGIN_HZ = 1_500  # must exceed the narrow limit by this to count
+DEV_MIN_EVIDENCE = 3            # measurements needed before a label is changed
+
+# Only measurements above this SNR are evidence. The estimator is p99 of the
+# instantaneous frequency, and FM clicks below the demodulation threshold
+# inflate that percentile — a narrowband handheld heard at 9 dB measures wider
+# than a wideband repeater heard at 51 dB:
+#
+#     in-chan SNR    narrow p99   wide p99
+#        51 dB          2537        5359
+#        17 dB          2864        5652
+#        13 dB          3185        5940
+#         9 dB          4068        6736   <- narrow now reads "wide"
+#
+# The inflation only ever pushes toward "wide", and "wide" is the verdict that
+# rules FRS out, so an ungated median mislabels exactly the distant handheld
+# this rule exists to protect. Above 18 dB the two populations stay separated
+# (narrow <= 3200, wide >= 5900) with the margin above.
+#
+# Measured against synthetic signals only. Phase 3 should re-measure it against
+# a real transmitter at known distances before this number is trusted.
+DEV_MIN_SNR_DB = 18.0
 
 
 # ---------------------------------------------------------------------------
@@ -92,32 +125,45 @@ def _channel_key(conn: sqlite3.Connection, freq_hz: int) -> tuple[int, list]:
     return round(freq_hz / FREQ_BIN_HZ) * FREQ_BIN_HZ, tied
 
 
-def _narrow_by_bandwidth(tied: list, evs: list) -> list:
-    """Drop candidate services whose authorised bandwidth the signal exceeds.
+def _usable_deviations(evs: list) -> list:
+    """Deviation measurements strong enough to mean anything. See DEV_MIN_SNR_DB."""
+    return sorted(e["deviation_hz"] for e in evs
+                  if e["deviation_hz"] is not None
+                  and e["snr_db"] is not None
+                  and e["snr_db"] >= DEV_MIN_SNR_DB)
 
-    462.675 is both FRS 20 (12.5 kHz) and GMRS 20 (20 kHz). A transmission there
-    measuring 17 kHz cannot be FRS, so the FRS candidate is removed and the
-    channel is labelled GMRS alone. A transmission measuring 11 kHz eliminates
-    nothing — narrowband GMRS radios are common and look identical to FRS.
+
+def _narrow_by_deviation(tied: list, evs: list) -> list:
+    """Drop candidate services whose peak deviation limit the signal exceeds.
+
+    462.675 is both FRS 20 (2.5 kHz peak deviation) and GMRS 20 (5 kHz). A
+    transmission there measuring 4.9 kHz cannot be FRS, so the FRS candidate is
+    removed and the channel is labelled GMRS alone. A transmission measuring
+    2.4 kHz eliminates nothing — narrowband GMRS radios are common and look
+    exactly like FRS.
 
     Returns `tied` unchanged when there is no disagreement to settle, when the
-    candidates share a bandwidth limit, or when too few events carry a usable
-    measurement.
+    candidates share a limit, or when too few events carry a measurement made
+    at a usable SNR.
     """
     if len(tied) < 2:
         return tied
-    limits = {t["bandwidth_hz"] for t in tied if t["bandwidth_hz"]}
+    limits = {DEVIATION_LIMIT_HZ.get(t["bandwidth_hz"])
+              for t in tied if t["bandwidth_hz"]}
+    limits.discard(None)
     if len(limits) < 2:
         return tied
 
-    widths = sorted(e["bandwidth_hz"] for e in evs if e["bandwidth_hz"])
-    if len(widths) < BW_MIN_EVIDENCE:
+    devs = _usable_deviations(evs)
+    if len(devs) < DEV_MIN_EVIDENCE:
         return tied
-    measured = statistics.median(widths)
+    measured = statistics.median(devs)
 
-    kept = [t for t in tied
-            if not t["bandwidth_hz"]
-            or measured <= t["bandwidth_hz"] + BW_EVIDENCE_MARGIN_HZ]
+    kept = []
+    for t in tied:
+        limit = DEVIATION_LIMIT_HZ.get(t["bandwidth_hz"])
+        if limit is None or measured <= limit + DEV_EVIDENCE_MARGIN_HZ:
+            kept.append(t)
     return kept or tied
 
 
@@ -157,8 +203,9 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
 
     now = time.time()
     rows = []
+    reported: dict[int, int] = {}       # bucket key -> frequency on the row
     for freq, evs in buckets.items():
-        tied = _narrow_by_bandwidth(plans[freq], evs)
+        tied = _narrow_by_deviation(plans[freq], evs)
         plan = tied[0] if tied else None
         # A shared allocation gets both names, so the report does not silently
         # claim a GMRS repeater output is an FRS channel.
@@ -166,6 +213,28 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
 
         modulation, _ = _modal([e["modulation"] for e in evs])
         content, _ = _modal([e["content"] for e in evs])
+
+        # The number the FRS/GMRS rule above just ruled on, kept where its
+        # verdict can be audited later — otherwise the only trace of why a
+        # channel lost a candidate label is a log line nobody saved. NULL means
+        # nothing was measured at a usable SNR, which is also what holds the
+        # channel at tier 0.
+        usable = _usable_deviations(evs)
+        deviation = round(statistics.median(usable), 1) if usable else None
+
+        # A discrete allocation reports its nominal frequency — the number you
+        # would programme. Everything else reports the median of what was
+        # actually measured, not the centre of the bin it landed in: FREQ_BIN_HZ
+        # groups measurements, and its grid has arbitrary phase against real
+        # allocations. 146.820 is a real repeater output inside a band segment
+        # with no channel entry, and binning would file it as 146.8187 — 1.25 kHz
+        # off, purely as an artefact of where the grid happens to fall.
+        if plan and plan["kind"] == "channel":
+            freq_reported = plan["freq_center_hz"]
+        else:
+            freq_reported = int(statistics.median(
+                sorted(e["freq_hz"] for e in evs)))
+        reported[freq] = freq_reported
 
         # Tone is the one field where disagreement matters. A repeater with a
         # consistent CTCSS gives the same value every keyup; a shared simplex
@@ -185,11 +254,19 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
         elif tone_state == "dcs":
             dcs, a2 = _modal([e["dcs_code"] for e in evs])
             pol, _ = _modal([e["dcs_polarity"] for e in evs])
-            if a2 < min_agreement:
+            if any(e["dcs_code"] is not None for e in evs) and a2 < min_agreement:
+                # Different codewords on one frequency: contested, and handled
+                # exactly like a contested CTCSS value.
                 dcs, pol, tone_state = None, None, "unknown"
+            # No codeword on any event is a different claim entirely. The deck
+            # saw a subaudible signal that is demonstrably not CTCSS and never
+            # decoded the word — that is knowledge, and it is the whole reason
+            # `dcs_suspected` exists. tone_state stays 'dcs', the codeword stays
+            # NULL, and the missing word is what caps the channel at tier 2.
+            # Decoding the 23-bit Golay word is what would move it to tier 3.
 
         rows.append(dict(
-            freq_hz=freq,
+            freq_hz=freq_reported,
             service=plan["service"] if plan else None,
             label=label,
             band_plan_id=plan["id"] if plan else None,
@@ -202,7 +279,12 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
             first_seen=min(e["t_start"] for e in evs),
             last_seen=max(e["t_start"] for e in evs),
             event_count=len(evs),
-            total_airtime_s=sum(e["duration_s"] for e in evs),
+            # An in-flight row — detected, never closed, because the deck lost
+            # power mid-transmission — has a NULL duration. It is still evidence
+            # that the channel was busy; it just cannot say for how long.
+            total_airtime_s=sum(e["duration_s"] for e in evs
+                                if e["duration_s"] is not None),
+            deviation_hz=deviation,
             rebuilt_at=now,
             notes=notes.get(freq),
         ))
@@ -213,10 +295,11 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
         """INSERT INTO channels
            (freq_hz, service, label, band_plan_id, modulation, content, tone_state,
             ctcss_hz, dcs_code, dcs_polarity, first_seen, last_seen, event_count,
-            total_airtime_s, rebuilt_at, notes)
+            total_airtime_s, deviation_hz, rebuilt_at, notes)
            VALUES (:freq_hz,:service,:label,:band_plan_id,:modulation,:content,
                    :tone_state,:ctcss_hz,:dcs_code,:dcs_polarity,:first_seen,
-                   :last_seen,:event_count,:total_airtime_s,:rebuilt_at,:notes)""",
+                   :last_seen,:event_count,:total_airtime_s,:deviation_hz,
+                   :rebuilt_at,:notes)""",
         rows)
     # Re-point events at their channel now that ids exist.
     conn.execute("UPDATE events SET channel_id = NULL")
@@ -225,7 +308,7 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
     ids = dict(conn.execute("SELECT freq_hz, id FROM channels"))
     links = []
     for freq, evs in buckets.items():
-        links += [(ids[freq], e["id"]) for e in evs]
+        links += [(ids[reported[freq]], e["id"]) for e in evs]
     conn.execute("BEGIN")
     conn.executemany("UPDATE events SET channel_id = ? WHERE id = ?", links)
     conn.execute("COMMIT")
@@ -274,7 +357,16 @@ def pair(conn: sqlite3.Connection) -> int:
             for o in outs:
                 best = None
                 for i in ins:
-                    if i["t_start"] > o["t_end"] + PAIR_MAX_LAG_S:
+                    # `ins` is sorted by t_start and the test below accepts only
+                    # |lag| <= PAIR_MAX_LAG_S, so once an input starts more than
+                    # one lag after this output started, no later one can match.
+                    #
+                    # This used to bound on o["t_end"], which is NULL for an
+                    # event still in flight — the deck logs one of those every
+                    # time it loses power mid-transmission, and it crashed the
+                    # whole enricher. t_start is never NULL, and it is the
+                    # tighter bound anyway.
+                    if i["t_start"] > o["t_start"] + PAIR_MAX_LAG_S:
                         break
                     lag = o["t_start"] - i["t_start"]
                     if abs(lag) <= PAIR_MAX_LAG_S:
@@ -308,12 +400,30 @@ def pair(conn: sqlite3.Connection) -> int:
 def score(conn: sqlite3.Connection, licences: set[str] | None = None) -> dict[int, int]:
     """Assign each channel a tier 0-4.
 
-      0  heard it — frequency and time only
-      1  know the signal type — modulation identified
-      2  know what it carries — voice, data or CW identified
-      3  could listen properly — tone known, or confirmed absent
-      4  could join in — legal for you to transmit, and if it is a repeater
-         output, the input frequency is known
+      0  heard it — too short to analyse; frequency and time only
+      1  analysed — deviation measured, so narrow vs wide is known
+      2  tone resolved — a CTCSS value, or confirmed clean
+      3  programmable — everything a radio needs, including the input if it is
+         a repeater output
+      4  joinable — and you may legally transmit on it
+
+    Each rung is something the deck can actually establish today. The old ladder
+    gated tier 2 on `content` — voice versus data — which nothing in the
+    pipeline classifies, so against real data every channel would have capped at
+    tier 1 forever. `content` is dropped from the ladder and left in the schema
+    for whatever eventually fills it.
+
+    Two rungs are deliberately strict:
+
+    DCS stops at 2. `dcs_suspected` is a boolean with no codeword, and "probably
+    some DCS" will not programme a radio. Decoding the 23-bit Golay word would
+    move these to 3.
+
+    A repeater output needs an *observed* input to reach 3. 146.820 is a real
+    repeater whose input sits 600 kHz down, outside the parked window, so the
+    deck never hears it — it stops at 2 rather than asserting a standard offset
+    it never confirmed. A repeater on a non-standard split would otherwise be
+    programmed wrong, silently.
 
     Tier 4 depends on what you hold, so `licences` comes from the profile:
     a set of service names you may transmit on, e.g. {'ham2m','ham70cm','frs'}.
@@ -326,18 +436,26 @@ def score(conn: sqlite3.Connection, licences: set[str] | None = None) -> dict[in
                              FROM channels c
                              LEFT JOIN band_plan b ON b.id = c.band_plan_id"""):
         t = 0
-        if c["modulation"]:
+        # Rung 1: analysed at all. NULL deviation means every keyup was shorter
+        # than the analysis dwell, or too weak to measure — heard, not examined.
+        if c["deviation_hz"] is not None:
             t = 1
-            if c["content"]:
+            if c["tone_state"] in ("none", "ctcss", "dcs"):
                 t = 2
-                if c["tone_state"] in ("none", "ctcss", "dcs"):
+                # Rung 3 needs a tone you could actually dial into a radio.
+                tone_programmable = (
+                    c["tone_state"] == "none"
+                    or (c["tone_state"] == "ctcss" and c["ctcss_hz"] is not None)
+                    or (c["tone_state"] == "dcs" and c["dcs_code"] is not None)
+                )
+                repeater_ok = not c["is_repeater_out"] or c["pair_id"] is not None
+                if tone_programmable and repeater_ok:
                     t = 3
                     may_transmit = (
                         c["service"] is not None
                         and (c["licensed"] == 0 or c["service"] in licences)
                     )
-                    repeater_ok = not c["is_repeater_out"] or c["pair_id"] is not None
-                    if may_transmit and repeater_ok:
+                    if may_transmit:
                         t = 4
         tiers[c["id"]] = t
 
