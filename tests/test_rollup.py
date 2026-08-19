@@ -7,7 +7,7 @@ migration 5 exists to permit exactly that — and both passes have to survive it
 
 import unittest
 
-from support import SRC, TempDirCase  # noqa: F401
+from support import TempDirCase
 
 import db
 import enrich

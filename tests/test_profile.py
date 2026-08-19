@@ -9,7 +9,7 @@ evidence six months later. These tests pin what the code takes from the file.
 import textwrap
 import unittest
 
-from support import PROFILE, SRC, TempDirCase  # noqa: F401
+from support import PROFILE, TempDirCase
 
 from survey_prototype import load_receiver_config
 

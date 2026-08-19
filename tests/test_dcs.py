@@ -9,7 +9,8 @@ generate a perfect code and both pass every internal check.
 import random
 import unittest
 
-from support import SRC  # noqa: F401  (puts src on the path)
+import support  # noqa: F401  — puts src/ on sys.path
+
 
 import dcs
 
@@ -168,8 +169,8 @@ class TestDcsFraming(unittest.TestCase):
 
     def test_random_words_are_rarely_accepted(self):
         # Golay maps every input to some codeword, so acceptance is governed by
-        # the fixed triple (1/8) and the unambiguous list (43/512): about 1.05%.
-        # Seeded, so this is deterministic rather than flaky.
+        # the fixed triple (1/8) and the standard code list (112/512): about
+        # 2.7%. Seeded, so this is deterministic rather than flaky.
         rng = random.Random(99)
         n = 20000
         hits = sum(1 for _ in range(n)

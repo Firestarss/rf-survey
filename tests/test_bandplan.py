@@ -17,7 +17,7 @@ import sys
 import tempfile
 import unittest
 
-from support import ROOT, SRC, TempDirCase  # noqa: F401
+from support import ROOT, TempDirCase
 
 import bandplan
 import db

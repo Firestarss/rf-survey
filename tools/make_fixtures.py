@@ -31,6 +31,7 @@ import random
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+import cli  # noqa: E402
 import db as dbmod  # noqa: E402
 from survey_prototype import ANALYZE_SECONDS  # noqa: E402
 
@@ -234,11 +235,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Python turns SIGPIPE into an exception, so piping this into `head` raises
-    # BrokenPipeError after the reader exits. Restore the default and die quietly.
-    import signal
-    try:
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    except (AttributeError, ValueError):
-        pass  # not POSIX, or not on the main thread
+    cli.quiet_broken_pipe()
     main()

@@ -32,8 +32,9 @@ import shutil
 import signal
 import sys
 import tempfile
-import wave
+import threading
 import time
+import wave
 
 import numpy as np
 from scipy.signal import firwin, lfilter, upfirdn
@@ -168,6 +169,39 @@ class Ring:
         return out
 
 
+def to_db(power):
+    """Power to dB, with a floor so an empty bin does not produce -inf.
+
+    Not named db(): this module imports db, the database layer, and shadowing
+    that at module scope makes every write in run() fail at the first call.
+    """
+    return 10.0 * np.log10(power + 1e-20)
+
+
+class Periodogram:
+    """Averaged power spectral density over the whole NFFT segments of a frame.
+
+    The detector and `--spectrum` both need exactly this and had their own copy
+    of it; the window and its gain are precomputed here because they depend only
+    on NFFT and recomputing them per frame is pure waste.
+    """
+
+    def __init__(self, rate, nfft=NFFT):
+        self.nfft = nfft
+        self.rate = rate
+        self.window = np.hanning(nfft).astype(np.float32)
+        self.gain = float(np.sum(self.window ** 2))
+
+    def __call__(self, samples):
+        """PSD of `samples`, or None if it is shorter than one segment."""
+        use = (len(samples) // self.nfft) * self.nfft
+        if use == 0:
+            return None
+        segs = samples[:use].reshape(-1, self.nfft)
+        spec = np.fft.fftshift(np.fft.fft(segs * self.window, axis=1), axes=1)
+        return (np.abs(spec) ** 2).mean(axis=0) / (self.gain * self.rate)
+
+
 class ChannelGrid:
     """Maps FFT bins onto an absolute 6.25 kHz channel grid."""
 
@@ -221,7 +255,7 @@ class NoiseFloor:
         estimate is a low percentile of it, so a carrier that stays up long
         enough to fill (100 - FLOOR_PCTILE)% of the history drags the floor up to
         meet itself, the SNR collapses, and the detector calls the transmission
-        over while it is still going. At the default 120 frames and the 20th
+        over while it is still going. At the default 120 frames and the 25th
         percentile that happens after 1.26 s — so every transmission longer than
         that was being truncated to 1.27 s, and every airtime total with it. A
         30 second ham QSO was logging as 1.27 seconds.
@@ -339,6 +373,8 @@ class OverloadMonitor:
     contains junk.
     """
 
+    BASELINE_PCTILE = 20        # quiet level across the baseline history
+
     def __init__(self, desense_db=6.0, baseline_frames=300):
         self.baseline = None
         self.baseline_frames = baseline_frames
@@ -356,7 +392,8 @@ class OverloadMonitor:
         if len(self.history) > self.baseline_frames:
             self.history.pop(0)
         if len(self.history) >= 60:
-            self.baseline = float(np.percentile(self.history, 20))
+            self.baseline = float(np.percentile(self.history,
+                                                self.BASELINE_PCTILE))
 
         desense = (self.baseline is not None
                    and wideband - self.baseline > self.desense_db)
@@ -495,10 +532,19 @@ def analyze_analog(iq, rate, offset_hz, keep_signals=False):
     # integer multiple of CHANNEL_HZ and rate/CHANNEL_HZ is an integer, so the
     # complex exponential repeats exactly every `period` samples. Tiling a
     # precomputed period is a memcpy instead of millions of transcendentals.
+    # Broadcast the period across whole rows rather than np.tile-ing it out to
+    # full length first: at 10 MSPS the tile alone is another 96 MB copy of the
+    # window, allocated and thrown away for every event analysed.
     period = int(round(rate / CHANNEL_HZ))
     k = int(round(offset_hz / CHANNEL_HZ))
     lut = np.exp(-2j * np.pi * k * np.arange(period) / period).astype(np.complex64)
-    baseband = iq * np.tile(lut, -(-n // period))[:n]
+    whole = (n // period) * period
+    baseband = np.empty(n, np.complex64)
+    if whole:
+        np.multiply(iq[:whole].reshape(-1, period), lut,
+                    out=baseband[:whole].reshape(-1, period))
+    if whole < n:
+        baseband[whole:] = iq[whole:] * lut[:n - whole]
 
     # Decimate with upfirdn and an explicitly sized filter. Not lfilter-then-
     # slice, which computes every output sample and discards 99% of them
@@ -528,10 +574,18 @@ def analyze_analog(iq, rate, offset_hz, keep_signals=False):
     #
     # A constant-envelope FM carrier makes this easy: |baseband| is flat while
     # the carrier is present and drops to the noise level when it is not.
+    # Smoothed before thresholding, and the edges taken from a percentile of
+    # the crossings rather than the first and last one. A single noise spike in
+    # the lead-in is enough to make strong[0] the very first sample, which
+    # defeats the trim entirely and puts the noise figure back in the answer.
     mag = np.abs(baseband)
-    strong = np.flatnonzero(mag > 0.4 * np.percentile(mag, 95))
-    if len(strong) >= 64 and (strong[-1] - strong[0]) >= 64:
-        baseband = baseband[strong[0]:strong[-1] + 1]
+    win = max(1, int(0.002 * audio_fs))         # 2 ms; shorter than any keyup
+    smooth = np.convolve(mag, np.ones(win) / win, mode="same")
+    strong = np.flatnonzero(smooth > 0.4 * np.percentile(smooth, 95))
+    if len(strong) >= 64:
+        lo, hi = int(np.percentile(strong, 1)), int(np.percentile(strong, 99))
+        if hi - lo >= 64:
+            baseband = baseband[lo:hi + 1]
 
     # FM discriminator: instantaneous frequency in Hz.
     prod = baseband[1:] * np.conj(baseband[:-1])
@@ -760,8 +814,7 @@ def spectrum_capture(args):
     stream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
     sdr.activateStream(stream)
     chunk = np.empty(fs, np.complex64)
-    window = np.hanning(NFFT).astype(np.float32)
-    window_gain = float(np.sum(window ** 2))
+    periodogram = Periodogram(rate)
 
     frames_db = []
     chan_db = []
@@ -777,14 +830,11 @@ def spectrum_capture(args):
             s = chunk[:st.ret]
             if np.mean(np.abs(s) > 0.9) > 1e-4:
                 clipped += 1
-            use = (st.ret // NFFT) * NFFT
-            if use == 0:
+            psd = periodogram(s)
+            if psd is None:
                 continue
-            segs = s[:use].reshape(-1, NFFT)
-            sp = np.fft.fftshift(np.fft.fft(segs * window, axis=1), axes=1)
-            psd = (np.abs(sp) ** 2).mean(axis=0) / (window_gain * rate)
-            frames_db.append(10.0 * np.log10(psd + 1e-20))
-            cdb = 10.0 * np.log10(grid.power(psd) + 1e-20)
+            frames_db.append(to_db(psd))
+            cdb = to_db(grid.power(psd))
             chan_db.append(cdb)
             floor_est.update(cdb)
     finally:
@@ -1316,16 +1366,8 @@ def selftest(rate, verbose=True):
     analyze_ms = bench(lambda: analyze_analog(iq, rate, 12500.0))
 
     chunk = (np.random.randn(fs) + 1j * np.random.randn(fs)).astype(np.complex64)
-    win = np.hanning(NFFT).astype(np.float32)
-    nseg = fs // NFFT
-    segs = chunk[:nseg * NFFT].reshape(nseg, NFFT)
-
-    def detect_step():
-        spec = np.fft.fftshift(np.fft.fft(segs * win, axis=1), axes=1)
-        psd = (np.abs(spec) ** 2).mean(axis=0)
-        return grid.power(psd)
-
-    detect_ms = bench(detect_step, 20)
+    periodogram = Periodogram(rate)
+    detect_ms = bench(lambda: grid.power(periodogram(chunk)), 20)
 
     floor = NoiseFloor(grid.n)
     pdb = np.random.randn(grid.n) - 90.0
@@ -1548,9 +1590,7 @@ def run(args):
     sdr.activateStream(stream)
 
     chunk = np.empty(fs, np.complex64)
-    window = np.hanning(NFFT).astype(np.float32)
-    window_gain = float(np.sum(window ** 2))
-    nseg = fs // NFFT
+    periodogram = Periodogram(rate)
 
     pending = {}
     min_analyze_samples = int(MIN_ANALYZE_SECONDS * rate)
@@ -1596,8 +1636,13 @@ def run(args):
     last_stat = time.time()
     stat_frames = 0
 
-    running = [True]
-    signal.signal(signal.SIGINT, lambda *_: running.__setitem__(0, False))
+    # SIGINT stops the loop at the next frame boundary rather than killing it
+    # mid-transaction: systemd sends SIGINT precisely so the in-flight events and
+    # the coverage window get closed. threading.Event is the plainest thing with
+    # the right semantics — set from a signal handler, read from the loop.
+    running = threading.Event()
+    running.set()
+    signal.signal(signal.SIGINT, lambda *_: running.clear())
 
     win_idx = 0
     window_id = None
@@ -1606,7 +1651,7 @@ def run(args):
     stream_failed = False
 
     try:
-        while running[0]:
+        while running.is_set():
             w = windows[win_idx % len(windows)]
 
             # Retune. Every per-channel index is defined relative to the centre,
@@ -1637,7 +1682,7 @@ def run(args):
                   + (f" ({w['label']})" if w["label"] else "")
                   + (f", {dwell_s:.0f} s" if deadline else "") + " ==")
 
-            while running[0] and (deadline is None or time.time() < deadline):
+            while running.is_set() and (deadline is None or time.time() < deadline):
                 status = sdr.readStream(stream, [chunk], fs, timeoutUs=2_000_000)
                 if status.ret <= 0:
                     if status.ret == soapy.SOAPY_SDR_OVERFLOW:
@@ -1661,13 +1706,10 @@ def run(args):
 
                 # ---- detection -------------------------------------------------
                 t0 = time.perf_counter()
-                if status.ret < NFFT:
+                psd = periodogram(samples)
+                if psd is None:
                     continue
-                use = (status.ret // NFFT) * NFFT
-                segs = samples[:use].reshape(-1, NFFT)
-                spec_ = np.fft.fftshift(np.fft.fft(segs * window, axis=1), axes=1)
-                psd = (np.abs(spec_) ** 2).mean(axis=0) / (window_gain * rate)
-                power_db = 10.0 * np.log10(grid.power(psd) + 1e-20)
+                power_db = to_db(grid.power(psd))
                 detect_ms_total += (time.perf_counter() - t0) * 1000.0
 
                 clipping, desense, clip_frac = overload.update(samples, power_db)
@@ -1806,11 +1848,11 @@ def run(args):
                       f"device re-enumerates — a wedged USB endpoint does not "
                       f"recover in place.", file=sys.stderr)
                 stream_failed = True
-                running[0] = False
+                running.clear()
 
             win_idx += 1
             if args.simulate and win_idx >= len(windows):
-                running[0] = False
+                running.clear()
     finally:
         # Coverage lives in coverage_windows (migration 7), one row per tune, so
         # "what were we listening to at 21:30" is answerable for a rotating

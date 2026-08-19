@@ -11,9 +11,10 @@ shaped like the ones the capture loop actually produces.
 
 import unittest
 
+import support  # noqa: F401  — puts src/ on sys.path
+
 import numpy as np
 
-from support import SRC  # noqa: F401
 
 import dcs
 import survey_prototype as proto
@@ -86,6 +87,25 @@ class TestSignalTrim(unittest.TestCase):
     def test_analyzed_s_reports_signal_not_window(self):
         got = proto.analyze_analog(window(0.8, lead_s=0.6), RATE, OFFSET)
         self.assertAlmostEqual(got["analyzed_s"], 0.8, delta=0.12)
+
+    def test_a_burst_in_the_lead_in_does_not_defeat_the_trim(self):
+        # The trim used to take its edges from the first and last sample over
+        # threshold, so any interference early in the pretrigger anchored it at
+        # the start of the window and the whole lead-in came back in. The
+        # deviation then reported ~11500 Hz — the noise figure — which is the
+        # exact failure the trim exists to prevent, and "wide" is the verdict
+        # that rules FRS out. Sub-millisecond is enough; it survives the
+        # decimation filter, unlike a single sample.
+        base = proto.analyze_analog(window(0.9), RATE, OFFSET)["deviation_hz"]
+        for burst_ms in (0.05, 1.0, 5.0):
+            iq = window(0.9, lead_s=0.5)
+            start = int(0.0001 * RATE)
+            iq[start:start + int(burst_ms / 1000 * RATE)] = 5.0 + 0j
+            got = proto.analyze_analog(iq, RATE, OFFSET)["deviation_hz"]
+            self.assertAlmostEqual(
+                got, base, delta=300,
+                msg=f"a {burst_ms} ms burst in the lead-in moved deviation to "
+                    f"{got:.0f} Hz")
 
     def test_a_tone_survives_the_trim(self):
         got = proto.analyze_analog(window(1.2, lead_s=0.4, tone=141.3),

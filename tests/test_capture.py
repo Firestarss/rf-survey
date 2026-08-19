@@ -16,7 +16,7 @@ import wave
 
 import numpy as np
 
-from support import SRC, TempDirCase  # noqa: F401
+from support import TempDirCase
 
 from survey_prototype import CaptureStore
 

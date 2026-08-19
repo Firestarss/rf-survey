@@ -29,6 +29,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import bandplan  # noqa: E402
+import cli  # noqa: E402
 
 # Measured frequencies that match no band plan channel get binned to this grid
 # before becoming a channel. This must not be finer than the detector's own
@@ -109,7 +110,8 @@ def tag(conn: sqlite3.Connection, retag: bool = False) -> int:
 # Pass 2: roll events up into channels
 # ---------------------------------------------------------------------------
 
-def _channel_key(conn: sqlite3.Connection, freq_hz: int) -> tuple[int, list]:
+def _channel_key(conn: sqlite3.Connection, freq_hz: int,
+                 cache: dict | None = None) -> tuple[int, list]:
     """Which channel does this measurement belong to?
 
     A band plan channel match gives the nominal frequency — the number you would
@@ -118,11 +120,21 @@ def _channel_key(conn: sqlite3.Connection, freq_hz: int) -> tuple[int, list]:
 
     Returns every co-equal match, because 462.675 genuinely is both FRS 20 and
     GMRS 20 and the channel row should say so.
+
+    `cache` is keyed on the frequency. Detected frequencies are quantised to the
+    6.25 kHz grid, so a whole festival resolves to a few dozen distinct lookups
+    rather than one query per event.
     """
+    if cache is not None and freq_hz in cache:
+        return cache[freq_hz]
     tied = bandplan.tied_best(conn, freq_hz)
     if tied and tied[0]["kind"] == "channel":
-        return tied[0]["freq_center_hz"], tied
-    return round(freq_hz / FREQ_BIN_HZ) * FREQ_BIN_HZ, tied
+        got = (tied[0]["freq_center_hz"], tied)
+    else:
+        got = (round(freq_hz / FREQ_BIN_HZ) * FREQ_BIN_HZ, tied)
+    if cache is not None:
+        cache[freq_hz] = got
+    return got
 
 
 def _usable_deviations(evs: list) -> list:
@@ -196,9 +208,24 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
 
     buckets: dict[int, list[sqlite3.Row]] = {}
     plans: dict[int, list] = {}
+    cache: dict[int, tuple] = {}
     for e in conn.execute("SELECT * FROM events"):
-        key, tied = _channel_key(conn, e["freq_hz"])
+        key, tied = _channel_key(conn, e["freq_hz"], cache)
         buckets.setdefault(key, []).append(e)
+        # Keep the most specific match anything in this bucket produced, not
+        # whichever event happened to arrive first. An event matching no channel
+        # bins to the grid, and that bin can be a real channel's nominal
+        # frequency, so the bucket can hold both kinds — and taking the first
+        # would make the label depend on row order.
+        #
+        # It cannot happen against the seeded plan today: every channel's match
+        # window is wider than half a bin, so anything binning to a nominal
+        # frequency also matches the channel. It becomes possible the moment one
+        # channel is seeded narrower than +/-3125 Hz, which is a data change,
+        # not a code change, and would fail silently.
+        if tied and (not plans.get(key)
+                     or tied[0]["width_hz"] < plans[key][0]["width_hz"]):
+            plans[key] = tied
         plans.setdefault(key, tied)
 
     now = time.time()
@@ -517,11 +544,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # Python turns SIGPIPE into an exception, so piping this into `head` raises
-    # BrokenPipeError after the reader exits. Restore the default and die quietly.
-    import signal
-    try:
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    except (AttributeError, ValueError):
-        pass  # not POSIX, or not on the main thread
+    cli.quiet_broken_pipe()
     main()

@@ -12,7 +12,7 @@ performs an implicit DELETE and empties `decodes` silently.
 import sqlite3
 import unittest
 
-from support import SRC, TempDirCase, build_at_version, schema_of  # noqa: F401
+from support import TempDirCase, build_at_version, schema_of
 
 import db
 import migrate

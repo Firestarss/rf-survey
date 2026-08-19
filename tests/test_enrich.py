@@ -8,7 +8,7 @@ so a break is attributable rather than just visible.
 
 import unittest
 
-from support import SRC, TempDirCase  # noqa: F401
+from support import TempDirCase
 
 import db
 import enrich

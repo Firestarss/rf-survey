@@ -7,7 +7,7 @@ of these check that bad input is refused rather than that good input works.
 import sqlite3
 import unittest
 
-from support import PROFILE, SRC, TempDirCase  # noqa: F401
+from support import PROFILE, TempDirCase
 
 import db
 import migrate

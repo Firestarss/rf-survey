@@ -24,6 +24,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+import cli  # noqa: E402
 import db as dbmod  # noqa: E402
 
 MHZ = 1_000_000
@@ -221,13 +222,23 @@ def add_windows(chans: list[Row]) -> list[Row]:
     by_service: dict[str, list[int]] = {}
     for c in chans:
         by_service.setdefault(c["service"], []).append(c["freq_center_hz"])
-    for v in by_service.values():
+    for svc, v in by_service.items():
         v.sort()
+        # index() below finds the first occurrence, so a duplicate would give
+        # both channels a zero gap, a zero-width window and freq_hi < freq_lo —
+        # which the schema CHECK rejects with nothing pointing at the cause.
+        dupes = {f for i, f in enumerate(v[1:]) if f == v[i]}
+        if dupes:
+            raise SystemExit(f"{svc} has duplicate channel frequencies: "
+                             f"{sorted(dupes)}")
+
+    positions = {svc: {f: i for i, f in enumerate(v)}
+                 for svc, v in by_service.items()}
 
     for c in chans:
         f, svc = c["freq_center_hz"], c["service"]
         peers = by_service[svc]
-        i = peers.index(f)
+        i = positions[svc][f]
         gaps = []
         if i > 0:
             gaps.append(f - peers[i-1])
@@ -250,7 +261,9 @@ COLS = ("freq_lo_hz", "freq_hi_hz", "freq_center_hz", "bandwidth_hz", "service",
         "licensed", "source", "notes")
 
 
-def main(path: str) -> None:
+def main(path: str) -> int:
+    """Seed `path`, creating or upgrading it first. Returns an exit status."""
+    dbmod.init_schema(path)
     conn = dbmod.connect(path)
     rows = add_windows(channels()) + segments()
 
@@ -292,14 +305,11 @@ def main(path: str) -> None:
           f"{' — OK' if not bad else ''}")
     for r in bad[:5]:
         print(f"    {r[0]}: {r[1]} vs {r[2]}")
+    # Non-zero, because an overlap makes lookup ambiguous and a check nobody
+    # can fail is not a check. This has to stay 0.
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
-    # Python turns SIGPIPE into an exception, so piping this into `head` raises
-    # BrokenPipeError after the reader exits. Restore the default and die quietly.
-    import signal
-    try:
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    except (AttributeError, ValueError):
-        pass  # not POSIX, or not on the main thread
-    main(sys.argv[1] if len(sys.argv) > 1 else "data/survey.sqlite")
+    cli.quiet_broken_pipe()
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "data/survey.sqlite"))

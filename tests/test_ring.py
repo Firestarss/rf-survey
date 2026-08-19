@@ -8,9 +8,10 @@ not the ones asked for.
 
 import unittest
 
+import support  # noqa: F401  — puts src/ on sys.path
+
 import numpy as np
 
-from support import SRC  # noqa: F401
 
 from survey_prototype import Ring
 
