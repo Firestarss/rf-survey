@@ -28,7 +28,7 @@ import survey_prototype as proto
 SKIP = os.environ.get("RFSURVEY_SKIP_SLOW") == "1"
 RATE = 2.4e6
 UHF = 466_000_000
-DCS_CODE = sorted(dcs.UNAMBIGUOUS_CODES)[0]
+DCS_CODE = sorted(dcs.STANDARD_CODES)[0]
 
 # Placed at least two grid channels apart so the local-maximum rule keeps them
 # distinct, and staggered so each duration is attributable to one transmission.

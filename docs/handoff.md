@@ -27,6 +27,12 @@ tools/deck-check.sh       soak and diagnostics
 profiles/festival.yaml    receiver assignments, detection thresholds, operator licences
 systemd/                  unit file and deployment notes for unattended running
 docs/phase_log.md         gate tracker. Phase 0 PASS.
+docs/bench-bringup.md     the nine-phase gated procedure. Read this on delivery day.
+docs/phase1-detail.md     Phase 1 step by step, headless
+docs/design-decisions.md  what was chosen, what was rejected, why
+docs/pi-architecture.md   where things live on radio-deck
+docs/rf-primer.md         the radio concepts
+docs/band-plan-notes.md   window choices and their reasoning
 ```
 
 Run the whole chain with no hardware:
@@ -46,7 +52,7 @@ analyser, the two-phase write and the retune logic end to end:
 python3 src/survey_prototype.py --simulate 14 --receiver-id uhf
 python3 src/survey_prototype.py --simulate 8 --rate 2.4e6 --receiver-id vhf \
         --dwell-seconds 6                       # rotation across three windows
-python3 src/dcs.py --check                      # is the DCS codeword table real yet
+python3 src/dcs.py                              # DCS codeword table self-check
 ```
 
 ---
@@ -242,9 +248,11 @@ Five changes were not in the original section 3 and are called out rather than b
 
 - **`content` is never determined.** Nothing classifies voice versus data. This is why
   it left the ladder.
-- **DCS is suspected, never decoded.** Decoding the 23-bit Golay word at 134.4 bps is
-  well-defined work and would move channels from tier 2 to tier 3.
-- **Transmissions shorter than `ANALYZE_SECONDS` (1.4 s) are never analysed.** Most
+- **DCS is now decoded** (2026-08-19, section 5). A channel with a codeword reaches
+  tier 3. `dcs_suspected` survives only for the case where something subaudible is
+  present, is demonstrably not CTCSS, and no codeword comes out — that still caps
+  at tier 2.
+- **Transmissions shorter than the analysis dwell are never fully analysed.** Most
   festival traffic is shorter than that, and those events now correctly sit at tier 0
   rather than being scored on fields nothing filled in. Analysing whatever dwell exists
   and reporting lower confidence is the obvious improvement.
@@ -446,29 +454,34 @@ no longer depends on `content`, so nothing is blocked by leaving it NULL. Revisi
 it with recorded audio from a real deployment — which `--capture-dir` now
 produces — rather than with more synthetic signals.
 
-**The DCS codeword table is not the real one, and 61 of 104 codes cannot be decoded
-because of it.** `src/dcs.py` implements Golay(23,12) correctly — that part is
-self-checking and tested, including error correction to the code's limit of three
-bits. What is not established is the mapping from a three-digit code to the 23 bits
-on the air. The code is *cyclic*, so all 23 rotations of a codeword are themselves
-codewords, and the all-ones vector is a codeword so the complement of one is too. A
-DCS transmission carries no sync pattern, just the word repeating forever, so
-framing rests entirely on the fixed triple and the list of legal codes — and under
-the convention implemented, transmitting 026 produces a bitstream that is also a
-legal framing of 311. Those are the same periodic sequence; no receiver could
-separate them. A real standard cannot have that property, so the real code set must
-be chosen so that no two legal codes are rotations or complements of each other, and
-the construction in `dcs.py` does not produce that set. Every plausible variation was
-searched — fixed triple 0 through 7, LSB and MSB first, with and without polarity
-search — and the best tops out at 70 of 104 framing uniquely.
+**DCS decoding is finished.** This was an open question and is now closed; kept
+here because the way it failed is instructive.
 
-The decoder therefore reports a code only where the framing is unambiguous and
-reports "DCS present, code unknown" otherwise, which is what it did before decoding
-existed. It never guesses: a wrong code sends you off to programme a radio that then
-sits silent. **To finish this**, replace the codeword construction in `dcs.py` with
-the real 23-bit word per code, from a verified reference or measured off a radio
-transmitting a known code. Nothing else changes — the decoder already matches
-against the table. `python3 src/dcs.py --check` prints 104/104 when it is right.
+The module shipped with the wrong Golay generator polynomial. 0xC75 and its
+reciprocal 0xAE3 both generate a perfect binary Golay code, both round-trip, both
+correct three bit errors, and both satisfy every internal consistency check the
+code can run — so every codeword it produced was a valid codeword of the wrong
+code, and nothing self-contained could have noticed. It took one decoded off-air
+word to settle it: DCS 023 is `100 000010011 11101100011`, and that single
+reference is now a test.
+
+The apparent ambiguity was also a misreading. Because the code is cyclic and
+all-ones is a codeword, every rotation and complement of a codeword is a codeword,
+which looked like it made blind framing impossible — and with the wrong polynomial
+and a guessed code list, 61 of 104 codes appeared undecodable. With the right
+polynomial and the real 112-code list, every waveform has exactly **two** legal
+readings, one normal and one inverted, and they are the same signal: transmitting
+023 normal *is* transmitting 047 inverted, and a radio set to either opens on it.
+That is the inverted-code pairing radio documentation lists. `dcs.INVERTED_PAIR`
+derives it from the codewords and asserts on import that every code pairs cleanly,
+so a future edit to the table that breaks the property fails at import rather than
+in the field.
+
+The decoder reports the normal reading, which every waveform has exactly one of.
+Measured against synthetic signals: every code decodes at 0.9 s and 1.4 s dwell,
+in both polarities, down to ~17 dB in-channel SNR, with zero wrong codes, zero
+CTCSS tones misread as DCS, and zero decodes from pure noise. `python3 src/dcs.py`
+prints the table's self-check.
 
 **Ham segments are ARRL national, not NESMC.** Correct for the country, wrong in detail
 for Massachusetts. Every row carries a `source` column; re-seeding replaces them by
@@ -489,22 +502,35 @@ deck produces.
 
 ---
 
-## 6. Not recoverable from the repository
+## 6. The design documents — restored
 
-`rm -rf *` in the home directory on 2026-08-19 destroyed five design documents that were
-never restored: `design-decisions.md`, `bench-bringup.md`, `rf-primer.md`,
-`pi-architecture.md`, `phase1-detail.md`. The bench bring-up plan in particular is the
-nine-phase gated procedure to follow the day the Airspys arrive — it exists only in the
-original design conversations. Restore it before hardware lands.
+`rm -rf *` in the home directory on 2026-08-19 destroyed five design documents. **They were
+restored and are in the repository**, tracked as of b304e79:
 
-`docs/band-plan-notes.md` was written but never installed, and its coverage section
-describes the old 153.200 MHz VHF window rather than the current 154.950.
+```
+docs/bench-bringup.md     788 lines   the nine-phase gated procedure. Read on delivery day.
+docs/phase1-detail.md     450 lines   Phase 1 broken out, desktop assumptions removed
+docs/design-decisions.md  342 lines   what was chosen, what was rejected, why
+docs/pi-architecture.md   334 lines   where things live on radio-deck
+docs/rf-primer.md         270 lines   the radio concepts, for a systems reader
+```
+
+An earlier version of this section said they were lost and had to be restored before
+hardware landed. That was already untrue when it was written — they were restored in the
+same commit. Corrected 2026-08-19 after checking the machine rather than the note.
+
+`docs/band-plan-notes.md` is installed and current: its coverage section gives the VHF
+window as 154.950 with the reasoning, not the old 153.200. That warning is also cleared.
+
+**`bench-bringup.md` carries its own copy of the phase table**, and it does not know about
+anything in sections 3 or 4 above. Its Phase 0 line still reads "28.8% of one core", which
+was measured before short transmissions were analysed at all, before DCS decoding, and
+before captures were written to disk. Re-measure before trusting it — see section 5.
 
 ---
 
 ## 7. Housekeeping still outstanding
 
-- README points at `tools/phase-log.md`; the file is `docs/phase_log.md`
 - DHCP reservation for `radio-deck` — it moved .243 to .244 mid-session once already
 - WiFi power save disabled via systemd oneshot (no NetworkManager on Ubuntu Server)
 - Map physical USB ports to buses and label the case. The two Airspys must land on

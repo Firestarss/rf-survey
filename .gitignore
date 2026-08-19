@@ -5,6 +5,3 @@ data/
 *.png
 *.csv
 __pycache__/
-
-# test artefacts
-tests/.seeded.sqlite*

@@ -103,11 +103,18 @@ class TestAgreementWithTheAnalyser(unittest.TestCase):
             self.assertEqual(self._analyse(ctcss_hz=tone)["ctcss_hz"], tone)
 
     def test_dcs_round_trips_in_both_polarities(self):
-        code = sorted(dcs.UNAMBIGUOUS_CODES)[0]
+        # Sending a code inverted is not a different rendering of that code, it
+        # is literally the waveform of its documented partner sent normally, so
+        # the partner is the right answer. The decoder always reports the normal
+        # reading, which every waveform has exactly one of.
+        code = sorted(dcs.STANDARD_CODES)[0]
+        expect = {"N": code, "I": dcs.INVERTED_PAIR[code]}
         for polarity in ("N", "I"):
             got = self._analyse(dcs_code=code, dcs_polarity=polarity)
-            self.assertEqual(got["dcs_code"], int(code))
-            self.assertEqual(got["dcs_polarity"], polarity)
+            self.assertEqual(got["dcs_code"], int(expect[polarity]),
+                             f"{code} sent {polarity} should read as "
+                             f"{expect[polarity]}")
+            self.assertEqual(got["dcs_polarity"], "N")
             self.assertEqual(got["dcs_errors"], 0)
 
     def test_a_plain_carrier_produces_no_tone(self):

@@ -9,8 +9,12 @@ computes match windows from authorised bandwidth and neighbour spacing, and a
 test that hand-wrote its own ranges would not exercise that.
 """
 
-import os
-import subprocess
+import contextlib
+import io
+import pathlib
+import shutil
+import sys
+import tempfile
 import unittest
 
 from support import ROOT, SRC, TempDirCase  # noqa: F401
@@ -18,26 +22,35 @@ from support import ROOT, SRC, TempDirCase  # noqa: F401
 import bandplan
 import db
 
+sys.path.insert(0, str(ROOT / "tools"))
+import seed_band_plan  # noqa: E402
+
 
 class SeededCase(TempDirCase):
+    """One seeded database per class, in a directory of its own.
+
+    Seeded once because it is the same deterministic data every time and
+    re-running it per test triples the module's runtime. In a temporary
+    directory because SQLite leaves -wal and -shm alongside the file: writing it
+    into tests/ left two of those in the working tree after every run, and
+    deleting only the database itself never cleared them.
+    """
 
     seeded = None
 
+    @classmethod
+    def setUpClass(cls):
+        cls._seed_dir = tempfile.mkdtemp(prefix="rfsurvey-bandplan-")
+        cls.addClassCleanup(shutil.rmtree, cls._seed_dir, ignore_errors=True)
+        cls.seeded = str(pathlib.Path(cls._seed_dir) / "seeded.sqlite")
+        db.init_schema(cls.seeded)
+        with contextlib.redirect_stdout(io.StringIO()):
+            seed_band_plan.main(cls.seeded)
+
     def setUp(self):
         super().setUp()
-        # Seed once per process: it is the same deterministic data every time and
-        # re-running it for every test triples the module's runtime.
-        cls = type(self)
-        if cls.seeded is None:
-            path = str(ROOT / "tests" / ".seeded.sqlite")
-            if os.path.exists(path):
-                os.unlink(path)
-            db.init_schema(path)
-            subprocess.run(["python3", str(ROOT / "tools" / "seed_band_plan.py"),
-                            path], check=True, capture_output=True, cwd=ROOT)
-            cls.seeded = path
-            self.addClassCleanup(lambda: os.path.exists(path) and os.unlink(path))
-        self.conn = db.connect(cls.seeded)
+        self.conn = db.connect(self.seeded)
+        self.addCleanup(self.conn.close)
 
 
 class TestSpecificity(SeededCase):

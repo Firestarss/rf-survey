@@ -159,7 +159,7 @@ class TestToneAndCode(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_dcs_decodes_and_reports_its_error_count(self):
-        code = sorted(dcs.UNAMBIGUOUS_CODES)[0]
+        code = sorted(dcs.STANDARD_CODES)[0]
         bits = np.array([1.0 if b else -1.0
                          for b in dcs.bit_sequence(code, "N")])
         got = proto.analyze_analog(
@@ -168,18 +168,31 @@ class TestToneAndCode(unittest.TestCase):
         self.assertEqual(got["dcs_polarity"], "N")
         self.assertIn(got["dcs_errors"], (0, 1, 2, 3))
 
-    def test_ambiguous_codes_are_flagged_but_never_named(self):
-        ambiguous = [c for c in dcs.STANDARD_CODES
-                     if c not in dcs.UNAMBIGUOUS_CODES]
-        for code in ambiguous[:6]:
+    def test_an_inverted_transmission_reads_as_its_partner(self):
+        # Sending X inverted is the same waveform as sending INVERTED_PAIR[X]
+        # normally, so that is the correct answer, not a misread. A radio
+        # programmed to either opens on it.
+        for code in list(dcs.STANDARD_CODES)[:4]:
+            bits = np.array([1.0 if b else -1.0
+                             for b in dcs.bit_sequence(code, "I")])
+            got = proto.analyze_analog(
+                proto.make_fm(None, RATE, dcs_word=bits), RATE, OFFSET)
+            self.assertEqual(got["dcs_code"], int(dcs.INVERTED_PAIR[code]),
+                             f"{code} sent inverted should read as "
+                             f"{dcs.INVERTED_PAIR[code]}")
+            self.assertEqual(got["dcs_polarity"], "N",
+                             "the normal reading is the canonical one")
+
+    def test_codes_across_the_whole_table_decode(self):
+        # Spread over the list rather than the first few, so a construction that
+        # only happens to work at one end of the code space fails here.
+        for code in list(dcs.STANDARD_CODES)[::16]:
             bits = np.array([1.0 if b else -1.0
                              for b in dcs.bit_sequence(code, "N")])
             got = proto.analyze_analog(
-                proto.make_fm(None, RATE, dcs_word=bits), RATE, OFFSET)
-            self.assertIsNone(got["dcs_code"],
-                              f"{code} is ambiguous and must not be named")
-            self.assertTrue(got["dcs_suspected"],
-                            "presence is still knowledge and still caps at tier 2")
+                proto.make_fm(None, RATE, dcs_word=bits, noise=0.5),
+                RATE, OFFSET)
+            self.assertEqual(got["dcs_code"], int(code))
 
     def test_random_noise_produces_no_codeword(self):
         for seed in range(6):

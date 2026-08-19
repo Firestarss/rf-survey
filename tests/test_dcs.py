@@ -1,9 +1,9 @@
 """Golay(23,12) and the DCS codeword layer.
 
-The arithmetic here is the one part of DCS handling that is provably correct
-rather than conventional, so it is tested hard. The framing convention is not
-established — see the src/dcs.py docstring — and the tests reflect that: they
-assert the decoder never reports a *wrong* code, not that it decodes everything.
+The arithmetic is provably correct rather than conventional, so it is tested
+hard. The one thing that is *not* derivable — which of the two Golay generator
+polynomials DCS uses — is pinned against a decoded off-air word, because both
+generate a perfect code and both pass every internal check.
 """
 
 import random
@@ -15,6 +15,20 @@ import dcs
 
 
 class TestGolay(unittest.TestCase):
+
+    def test_matches_a_decoded_off_air_word(self):
+        """The only external anchor in this file, and the reason it exists.
+
+        0xC75 and its reciprocal 0xAE3 both generate a perfect binary Golay code,
+        both round-trip, both correct three bit errors, and both satisfy every
+        other test here. Only one is the code DCS transmits. This module shipped
+        with the wrong one, producing valid codewords of the wrong code, and no
+        internal consistency check could have noticed.
+        """
+        reference = int("100" "000010011" "11101100011", 2)
+        self.assertEqual(dcs.encode("023"), reference)
+        self.assertEqual(dcs.decode(reference), ("023", 0))
+        self.assertEqual(dcs.GOLAY_POLY, 0xC75)
 
     def test_code_is_perfect(self):
         # sum(C(23,k) for k in 0..3) == 2048 == 2^11. If the generator polynomial
@@ -31,7 +45,7 @@ class TestGolay(unittest.TestCase):
 
     def test_round_trip_every_standard_code(self):
         for code in dcs.STANDARD_CODES:
-            got = dcs.decode(dcs.encode(code), unique_only=False)
+            got = dcs.decode(dcs.encode(code))
             self.assertEqual(got, (code, 0), f"round trip failed for {code}")
 
     def test_corrects_up_to_three_bit_errors(self):
@@ -43,7 +57,7 @@ class TestGolay(unittest.TestCase):
                     err = 0
                     for bit in rng.sample(range(dcs.WORD_BITS), weight):
                         err |= 1 << bit
-                    got = dcs.decode(word ^ err, unique_only=False)
+                    got = dcs.decode(word ^ err)
                     self.assertEqual(
                         got, (code, weight),
                         f"{code} with {weight} flipped bits decoded as {got}")
@@ -61,7 +75,7 @@ class TestGolay(unittest.TestCase):
                 err = 0
                 for bit in rng.sample(range(dcs.WORD_BITS), 4):
                     err |= 1 << bit
-                got = dcs.decode(word ^ err, unique_only=False)
+                got = dcs.decode(word ^ err)
                 if got is not None:
                     self.assertNotEqual(got[0], code,
                                         "4-bit error was corrected to the true code")
@@ -77,7 +91,7 @@ class TestDcsFraming(unittest.TestCase):
             if triple == dcs.FIXED_TRIPLE:
                 continue
             data = (triple << dcs.CODE_BITS) | int("023", 8)
-            self.assertIsNone(dcs.decode(dcs.golay_encode(data), unique_only=False),
+            self.assertIsNone(dcs.decode(dcs.golay_encode(data)),
                               f"fixed triple {triple:03b} should not decode")
 
     def test_non_standard_codes_are_rejected(self):
@@ -87,49 +101,61 @@ class TestDcsFraming(unittest.TestCase):
             if code in dcs.STANDARD_CODES:
                 continue
             data = (dcs.FIXED_TRIPLE << dcs.CODE_BITS) | value
-            self.assertIsNone(dcs.decode(dcs.golay_encode(data), unique_only=False))
+            self.assertIsNone(dcs.decode(dcs.golay_encode(data)))
             rejected += 1
         self.assertGreater(rejected, 300, "test should be exercising many codes")
 
-    def test_unique_only_filters_to_unambiguous_codes(self):
+    def test_every_standard_code_decodes(self):
         for code in dcs.STANDARD_CODES:
-            got = dcs.decode(dcs.encode(code), unique_only=True)
-            if code in dcs.UNAMBIGUOUS_CODES:
-                self.assertEqual(got, (code, 0))
-            else:
-                self.assertIsNone(got, f"{code} is ambiguous and must not decode")
+            self.assertEqual(dcs.decode(dcs.encode(code)), (code, 0))
 
-    def test_never_reports_a_wrong_code_under_any_framing(self):
+    def test_a_waveform_reads_only_as_its_own_code_or_its_partner(self):
         """The safety property. This is the one that must never regress.
 
-        A DCS stream has no sync pattern, so a receiver must try all 23 rotations
-        in both polarities. The code is cyclic and all-ones is a codeword, so
-        every one of those 46 framings is a valid codeword. Whatever comes back
-        must be either the transmitted code or nothing — never a different one.
+        A DCS stream has no sync pattern, so a receiver tries all 23 rotations in
+        both polarities; the code is cyclic and all-ones is a codeword, so all 46
+        framings are valid codewords. Exactly two of them may be legal codes: this
+        code read normally, and its inverted partner. Anything else means the
+        decoder could name a code that was never transmitted.
         """
         all_ones = (1 << dcs.WORD_BITS) - 1
         for code in dcs.STANDARD_CODES:
+            allowed = {code, dcs.INVERTED_PAIR[code]}
             word = dcs.encode(code)
-            for polarity in (0, all_ones):
-                value = word ^ polarity
+            for value in (word, word ^ all_ones):
                 for rot in range(dcs.WORD_BITS):
                     rotated = ((value >> rot)
                                | (value << (dcs.WORD_BITS - rot))) & all_ones
-                    got = dcs.decode(rotated, unique_only=True)
+                    got = dcs.decode(rotated)
                     if got is not None:
-                        self.assertEqual(
-                            got[0], code,
-                            f"transmitting {code} decoded as {got[0]} "
-                            f"at rotation {rot}")
+                        self.assertIn(
+                            got[0], allowed,
+                            f"transmitting {code} could be read as {got[0]}, "
+                            f"which is neither it nor its partner "
+                            f"{dcs.INVERTED_PAIR[code]}")
 
-    def test_ambiguity_is_reported_honestly(self):
-        # If this ever reaches 104/104 the codeword table has been corrected and
-        # the caveats in the docstrings should come out. Until then the count is
-        # a fact worth pinning so nobody assumes DCS is finished.
-        self.assertLess(len(dcs.UNAMBIGUOUS_CODES), len(dcs.STANDARD_CODES),
-                        "table now unambiguous — update src/dcs.py docs and "
-                        "remove the never-guess caveats")
-        self.assertGreaterEqual(len(dcs.UNAMBIGUOUS_CODES), 43)
+    def test_every_code_has_exactly_one_inverted_partner(self):
+        # The property the whole decoder rests on. If it ever fails, either the
+        # code list or the codeword construction is wrong, and the decoder can
+        # name a code nobody transmitted.
+        self.assertEqual(len(dcs.INVERTED_PAIR), len(dcs.STANDARD_CODES))
+        for code, partner in dcs.INVERTED_PAIR.items():
+            self.assertIn(partner, dcs.STANDARD_CODES)
+            self.assertEqual(dcs.INVERTED_PAIR[partner], code,
+                             f"{code}/{partner} pairing is not symmetric")
+
+    def test_the_pairing_is_a_real_waveform_identity(self):
+        # Not bookkeeping: sending X inverted really is sending its partner
+        # normally, bit for bit, up to where the receiver happens to frame it.
+        all_ones = (1 << dcs.WORD_BITS) - 1
+        for code in list(dcs.STANDARD_CODES)[:20]:
+            partner = dcs.encode(dcs.INVERTED_PAIR[code])
+            inverted = dcs.encode(code) ^ all_ones
+            rotations = {((partner >> r) | (partner << (dcs.WORD_BITS - r)))
+                         & all_ones for r in range(dcs.WORD_BITS)}
+            self.assertIn(inverted, rotations,
+                          f"{code} inverted is not a rotation of "
+                          f"{dcs.INVERTED_PAIR[code]}")
 
     def test_bit_sequence_polarity_is_exact_complement(self):
         for code in list(dcs.STANDARD_CODES)[:12]:

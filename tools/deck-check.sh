@@ -12,9 +12,15 @@
 # Send the whole output. Redirect it:
 #   bash deck-check.sh all > phase0-$(date +%Y%m%d-%H%M).txt 2>&1
 
+# Everything below addresses the repository by relative path, so run from its
+# root whatever directory the caller happened to be in. Without this, DB and
+# the prototype are only found when invoked from exactly one place.
+cd "$(dirname "$0")/.." || exit 1
+
 MODE="${1:-diag}"
 MINUTES="${2:-10}"
 DB="${DB:-data/survey.sqlite}"   # the one survey database; there is no bench.sqlite
+PROTO=src/survey_prototype.py
 
 sep() { printf '\n===== %s =====\n' "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -292,16 +298,11 @@ diag() {
   python3 -c "import numpy; numpy.show_config()" 2>&1 | head -20
 
   sep "selftest"
-  PROTO=""
-  for cand in ./survey_prototype.py "$(dirname "$0")/survey_prototype.py" \
-              ../survey_prototype.py "$HOME/survey_prototype.py"; do
-    [ -f "$cand" ] && { PROTO="$cand"; break; }
-  done
-  if [ -n "$PROTO" ]; then
+  if [ -f "$PROTO" ]; then
     echo "running $PROTO"
     python3 "$PROTO" --selftest --rate 10e6 2>&1
   else
-    echo "survey_prototype.py not found near $(pwd) — run it yourself and paste the output"
+    echo "$PROTO not found under $(pwd) — this script must live in tools/"
   fi
 
   sep "database summary"

@@ -10,6 +10,15 @@ Documentation=file:/home/firestarss/rfsurvey/docs/handoff.md
 # Nothing here should wait on the network: it must start and keep logging
 # whether or not WiFi ever associates.
 After=local-fs.target
+
+# Grouped under rfsurvey.target so both receivers start and stop as one unit.
+# PartOf, not just WantedBy, because that is what makes `systemctl stop
+# rfsurvey.target` propagate down to the instances.
+PartOf=rfsurvey.target
+
+# If it fails ten times in five minutes it is not going to fix itself: the radio
+# is unplugged, the profile is wrong, or the database is unwritable. Stop and
+# leave it stopped rather than churning.
 StartLimitIntervalSec=300
 StartLimitBurst=10
 
@@ -25,12 +34,20 @@ ExecStart=/usr/bin/python3 src/survey_prototype.py \
     --capture-dir data/captures \
     --stats
 
-# survey_prototype exits non-zero when the stream stops delivering samples, which
-# is the case that matters: a wedged USB endpoint does not recover in process, so
-# the fix is to exit and let the device re-enumerate on restart. Restart=always
-# rather than on-failure because a clean exit here is also unexpected — under a
-# supervisor there is no such thing as "the survey finished".
-Restart=always
+# on-failure, deliberately, not always.
+#
+# The deck is not the only thing this machine is for, and the survey is something
+# you start and stop rather than something that is simply always on. on-failure
+# gives the two behaviours that matters:
+#
+#   crash, or a non-zero exit - restarted. survey_prototype exits non-zero when
+#   the stream stops delivering samples, which is the case worth recovering: a
+#   wedged USB endpoint does not come back in process, only re-enumeration fixes
+#   it, and that needs a fresh start.
+#
+#   `systemctl stop`, or a clean exit - stays stopped. Restart=always would fight
+#   you here, bringing the survey back up seconds after you deliberately ended it.
+Restart=on-failure
 RestartSec=10
 
 # SIGINT, not SIGTERM: the capture loop installs a SIGINT handler that stops the
@@ -58,5 +75,8 @@ ProtectControlGroups=yes
 ProtectKernelTunables=yes
 RestrictRealtime=yes
 
+# Deliberately NOT enabled by default - see systemd/README.md. Installing the
+# unit only makes `systemctl start` available; nothing runs until you say so, and
+# nothing starts at boot unless you explicitly `systemctl enable` it later.
 [Install]
-WantedBy=multi-user.target
+WantedBy=rfsurvey.target

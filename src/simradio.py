@@ -121,7 +121,8 @@ class SimulatedRadio:
     SOAPY_SDR_OVERFLOW = -4
 
     def __init__(self, transmissions, *, rate=2_400_000.0, center_hz=466_000_000.0,
-                 noise=0.05, serial="SIMULATED", seed=0, duration_s=None):
+                 noise=0.05, serial="SIMULATED", seed=0, duration_s=None,
+                 announce=False):
         self.txs = list(transmissions)
         self.rate = float(rate)
         self.center = float(center_hz)
@@ -130,6 +131,10 @@ class SimulatedRadio:
         self.rng = np.random.default_rng(seed)
         self.duration_s = duration_s
         self.samples_read = 0
+        # Only --simulate wants the per-window summary; a unit test calling
+        # readStream directly wants its stdout back.
+        self.announce = announce
+        self._announced = None
         self.gain = None
         self.ppm = None
 
@@ -141,12 +146,17 @@ class SimulatedRadio:
         return self.rate
 
     def setFrequency(self, _dir, _ch, hz):
-        # Retuning replays the scenario from the top, so every window sees the
-        # same synthetic traffic and a rotation test exercises each one properly.
+        # Retuning replays the scenario from the top, so a rotating receiver
+        # gets a full scenario per window rather than whatever was left of one.
         # A real radio obviously does not rewind; this is the one place the
         # simulation is deliberately not lifelike.
+        #
+        # It replays the WHOLE scenario, but a window only hears the part of it
+        # inside its span — see audible(). Every window in the profile has
+        # traffic written for it; a window with none is announced as such.
         self.center = float(hz)
         self.samples_read = 0
+        self._announced = None
 
     def getFrequency(self, _dir, _ch):
         return self.center
@@ -176,8 +186,39 @@ class SimulatedRadio:
     def closeStream(self, _s):
         pass
 
+    def audible(self):
+        """The scenario transmissions this window can actually hear.
+
+        A transmission further than half the span from the centre is simply not
+        generated, so a window containing none of the scenario produces silence
+        that looks exactly like a detector which has stopped working. The
+        scenario is written at absolute frequencies, so which ones a window
+        hears is a property of where it is tuned, not of the code under test.
+        """
+        return [t for t in self.txs
+                if abs(t.freq_hz - self.center) <= self.rate * 0.45]
+
+    def _announce(self):
+        heard = self.audible()
+        outside = len(self.txs) - len(heard)
+        if not heard:
+            print(f"  simulated: nothing in this window — {outside} scenario "
+                  f"transmission(s), none within "
+                  f"+/-{self.rate*0.45/1e6:.2f} MHz of "
+                  f"{self.center/1e6:.3f} MHz. Silence here is the scenario, "
+                  f"not the detector.")
+            return
+        print(f"  simulated: {len(heard)} transmission(s) in this window"
+              + (f", {outside} outside it" if outside else ""))
+        for t in heard:
+            print(f"    {t.freq_hz/1e6:10.4f} MHz  {t.duration_s:.2f} s"
+                  + (f"  {t.label}" if t.label else ""))
+
     def readStream(self, _stream, buffers, numElems, timeoutUs=0):
         """Fill the caller's buffer with the next block of synthetic IQ."""
+        if self.announce and self._announced != self.center:
+            self._announced = self.center
+            self._announce()
         n = int(numElems)
         n0 = self.samples_read
         if self.duration_s is not None and n0 / self.rate >= self.duration_s:
@@ -216,7 +257,7 @@ class SimulatedRadio:
 
 
 def festival_scenario(t0=2.0):
-    """Transmissions with known answers, spread across the UHF and VHF windows.
+    """Transmissions with known answers, one group per window in the profile.
 
     t0 clears the noise-floor warm-up. NoiseFloor needs FLOOR_FRAMES of history
     before it reports anything — about 1.6 s — and until then the detector cannot
@@ -225,8 +266,14 @@ def festival_scenario(t0=2.0):
     Chosen so that each one is the only thing that can explain a particular row
     in the database, which is what makes the assertions in --simulate meaningful
     rather than decorative.
+
+    Every window `profiles/festival.yaml` defines has traffic here, and every
+    frequency is within +/-1.08 MHz of its centre so it survives a 2.4 MSPS run
+    as well as a 10 MSPS one. Without that, the documented rotation command
+    logged one event across three windows and the two silent windows looked
+    exactly like a broken detector.
     """
-    code = sorted(dcs_mod.UNAMBIGUOUS_CODES)[0]
+    code = sorted(dcs_mod.STANDARD_CODES)[0]
     return [
         # UHF window, centred 466.000
         Transmission(462_675_000, t0, 4.0, ctcss_hz=141.3, deviation_hz=4900,
@@ -240,4 +287,14 @@ def festival_scenario(t0=2.0):
         # VHF window, centred 146.000
         Transmission(146_520_000, t0 + 1.0, 3.0, deviation_hz=2400, snr_db=32,
                      label="2 m calling — no tone"),
+        # VHF window, centred 446.000. Offset from the calling channel rather
+        # than on it: a signal at exactly the centre sits on DC, which is not
+        # where a real receiver is at its best and not what this is testing.
+        Transmission(446_012_500, t0 + 1.0, 2.0, ctcss_hz=100.0,
+                     deviation_hz=2400, snr_db=33,
+                     label="70 cm simplex, CTCSS"),
+        # VHF window, centred 154.950
+        Transmission(154_570_000, t0 + 1.0, 2.5, ctcss_hz=67.0,
+                     deviation_hz=2400, snr_db=35,
+                     label="MURS 154.570 (Blue Dot), CTCSS"),
     ]

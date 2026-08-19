@@ -419,10 +419,9 @@ def apply(conn: sqlite3.Connection, target: int, verbose: bool = False) -> int:
                 f"migration left {len(broken)} dangling foreign key reference(s): "
                 f"{broken[:5]}")
 
-    if have < target:
-        # schema.sql already wrote the target version for a fresh database.
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?)",
-            (str(target),),
-        )
+    # Deliberately no fallback stamp for `have < target`. That can only happen
+    # when the target is past the last migration, and stamping it there would
+    # mark a database as upgraded by a step that does not exist. init_schema()
+    # compares the version afterwards and raises, which is the loud failure the
+    # situation deserves.
     return ran

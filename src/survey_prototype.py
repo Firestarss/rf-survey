@@ -396,18 +396,20 @@ def decode_dcs(tone_sig, tone_fs):
     2. Framing. There is no sync pattern either — the word simply repeats — so
        all 23 rotations are tried, in both polarities. An inverted DCS is the
        same word with every bit flipped, which is a real thing radios transmit.
-    3. Agreement, then unambiguity. Golay correction maps *every* 23-bit input to
-       some codeword, so a single decode is not evidence: noise clears the fixed
-       triple and lands in the standard code list once every 39 tries. Two
-       repeats of the word must decode to the same code first.
+    3. Agreement, then the polarity pair. Golay correction maps *every* 23-bit
+       input to some codeword, so a single decode is not evidence: noise clears
+       the fixed triple and lands in the standard code list about once every 37
+       tries. Two repeats of the word must decode to the same code first.
 
-       That is still not enough, because the code is cyclic — see src/dcs.py.
-       Several framings of the same real signal can each be internally consistent
-       and decode to different legal codes, and the stream cannot tell them apart
-       because they *are* the same stream. So if the framings disagree, this
-       returns None rather than picking one. dcs.decode already filters out codes
-       known to be ambiguous under the current table; this catches the rest.
+       Then the structure of the standard is used as a second, much stronger
+       check. Because the code is cyclic and all-ones is a codeword, a genuine
+       DCS waveform presents exactly two legal readings — one normal, one
+       inverted — and they are a documented pair: 023 normal is 047 inverted, the
+       same signal. So a real transmission yields one N code and its
+       INVERTED_PAIR partner and nothing else. Noise does not produce that
+       structure, and neither does a CTCSS tone sliced at 134.4 bps.
 
+    Reports the normal reading, which every waveform has exactly one of.
     Returning None does not mean "no DCS" — analyze_analog still flags
     dcs_suspected from the capture ratio, and the channel caps at tier 2 exactly
     as it did before decoding existed.
@@ -467,14 +469,22 @@ def decode_dcs(tone_sig, tone_fs):
 
     if not found:
         return None
-    codes = {f[2] for f in found}
-    if len(codes) != 1:
-        # Two framings of one stream, two legal codes, no way to choose. Refuse.
-        # A wrong code is worse than no code: it sends you off to programme a
-        # radio that then sits silent.
+
+    normal = {f[2] for f in found if f[3] == "N"}
+    inverted = {f[2] for f in found if f[3] == "I"}
+    if len(normal) != 1:
+        # A real waveform has exactly one normal reading. Anything else is noise
+        # that happened to clear the checks at more than one framing.
         return None
-    agree, _, code, polarity, nerr = max(found)
-    return code, polarity, nerr, agree
+    code = normal.pop()
+    if inverted and inverted != {dcs_mod.INVERTED_PAIR[code]}:
+        # The inverted reading must be this code's documented partner. It is a
+        # free consistency check and noise almost never satisfies it.
+        return None
+
+    best = max(f for f in found if f[2] == code and f[3] == "N")
+    agree, _, _, _, nerr = best
+    return code, "N", nerr, agree
 
 
 def analyze_analog(iq, rate, offset_hz, keep_signals=False):
@@ -541,10 +551,24 @@ def analyze_analog(iq, rate, offset_hz, keep_signals=False):
     #     FRS-like  2.5 kHz     2700         1127        2537
     #     GMRS wide 5.0 kHz     5750         2581        5359
     #
+    # Measured about the carrier, not about the channel centre. inst has a DC
+    # term equal to however far the transmitter sits from the 6.25 kHz grid
+    # slot it was filed under, and p99(|inst|) adds that offset straight onto
+    # the answer:
+    #
+    #     carrier off grid    0 Hz      1250 Hz    2500 Hz    3125 Hz
+    #     reported (2.4 kHz)  2326      3539       4788       5414
+    #
+    # Eleven of the seeded channels are off-grid by 1250-2500 Hz — every MURS
+    # channel, several Part 90 VHF dots, and 146.520 — so a narrowband signal
+    # on one of them reported wide, and "wide" is the verdict that rules FRS
+    # out. Subtracting the mean is what makes this peak DEVIATION rather than
+    # peak excursion from an arbitrary grid.
+    #
     # This is an estimate of peak deviation in Hz. Nothing has verified it
     # against a real transmitter yet — that is Phase 3.
-    deviation = float(np.percentile(np.abs(inst), 99.0))
     freq_error = float(np.mean(inst))
+    deviation = float(np.percentile(np.abs(inst - freq_error), 99.0))
 
     # Subaudible band: low-pass to 300 Hz, then decimate to ~2 kHz. The 300 Hz
     # filter is essential — without it the tone band carries voice energy and
@@ -1073,7 +1097,7 @@ def selftest(rate, verbose=True):
     # against a known input is the whole question. Synthetic only: this closes
     # the estimator half of "measurement accuracy unverified", not the receiver
     # half, which needs a real transmitter in Phase 3.
-    print("\n  deviation estimate  (peak, p99 of |inst|)")
+    print("\n  deviation estimate  (peak, p99 of |inst - mean|)")
     dev_ok = True
     for voice_dev in (1500.0, 3000.0, 5000.0):
         t = np.arange(int(crate * 1.4)) / crate
@@ -1139,7 +1163,6 @@ def selftest(rate, verbose=True):
         log.start(1, 1010.0, 462_650_000, overload=False)
         log.analysed(1, analyze_analog(make_fm(None, crate), crate, 12500.0),
                      462_650_000)
-        conn.commit()
 
         closed = conn.execute(
             "SELECT * FROM events WHERE freq_hz = ?", (freq,)).fetchone()
@@ -1181,7 +1204,6 @@ def selftest(rate, verbose=True):
                 r = analyze_analog(make_fm(w, crate, noise=0.01), crate, 12500.0)
                 log.start(100 + i, 2000.0 + i, 462_700_000)
                 log.analysed(100 + i, r, 462_700_000)
-            conn.commit()
             worst = conn.execute("SELECT MAX(confidence) FROM events").fetchone()[0]
             print(f"    {len(CTCSS_TONES)} tones inserted, max confidence "
                   f"{worst:.6f}   ok")
@@ -1192,10 +1214,10 @@ def selftest(rate, verbose=True):
     ok &= db_ok
 
     # --- DCS decoding ------------------------------------------------------
-    print(f"\n  DCS decoding  ({len(dcs_mod.UNAMBIGUOUS_CODES)}/"
-          f"{len(dcs_mod.STANDARD_CODES)} codes frame unambiguously)")
+    print(f"\n  DCS decoding  ({len(dcs_mod.STANDARD_CODES)} standard codes, "
+          f"generator 0x{dcs_mod.GOLAY_POLY:X})")
     dcs_ok = True
-    probe = sorted(dcs_mod.UNAMBIGUOUS_CODES)[:4]
+    probe = sorted(dcs_mod.STANDARD_CODES)[:4]
     for code in probe:
         bits = np.array([1.0 if b else -1.0
                          for b in dcs_mod.bit_sequence(code, "N")])
@@ -1203,7 +1225,8 @@ def selftest(rate, verbose=True):
                                    noise=0.5), crate, 12500.0)
         hit = r["dcs_code"] == int(code) and r["dcs_polarity"] == "N"
         dcs_ok &= hit
-        print(f"    code {code} -> {r['dcs_code']}{r['dcs_polarity'] or ''} "
+        shown = "none" if r["dcs_code"] is None else f"{r['dcs_code']:03d}"
+        print(f"    code {code} -> {shown}{r['dcs_polarity'] or ''} "
               f"({r['dcs_errors']} bit err)  {'ok' if hit else 'FAILED'}")
     # A CTCSS tone must never come back as a DCS code. Sliced at 134.4 bps a
     # pure tone is periodic, so every 23-bit window agrees with every other —
@@ -1217,19 +1240,21 @@ def selftest(rate, verbose=True):
           + (f"  {tone_as_dcs}" if tone_as_dcs else ""))
     dcs_ok &= not tone_as_dcs
 
-    # The property that matters more than the decode rate: never a wrong code.
-    wrong = 0
-    for code in [c for c in dcs_mod.STANDARD_CODES
-                 if c not in dcs_mod.UNAMBIGUOUS_CODES][:6]:
+    # Sending a code inverted is the same waveform as sending its documented
+    # partner normally, so that is the right answer rather than a misread.
+    inv_ok = True
+    for code in sorted(dcs_mod.STANDARD_CODES)[:3]:
         bits = np.array([1.0 if b else -1.0
-                         for b in dcs_mod.bit_sequence(code, "N")])
+                         for b in dcs_mod.bit_sequence(code, "I")])
         got = analyze_analog(make_fm(None, crate, dur=1.4, dcs_word=bits),
                              crate, 12500.0)["dcs_code"]
-        if got is not None and got != int(code):
-            wrong += 1
-    print(f"    ambiguous codes guessed at: {wrong} (must be 0 — a wrong code "
-          f"is worse than none)")
-    dcs_ok &= wrong == 0
+        hit = got == int(dcs_mod.INVERTED_PAIR[code])
+        inv_ok &= hit
+        shown = "none" if got is None else f"{got:03d}"
+        print(f"    {code} sent inverted -> {shown} "
+              f"(= {dcs_mod.INVERTED_PAIR[code]}, its pair)  "
+              f"{'ok' if hit else 'FAILED'}")
+    dcs_ok &= inv_ok
     ok &= dcs_ok
 
     # --- analysis window trim ----------------------------------------------
@@ -1372,6 +1397,18 @@ def load_receiver_config(profile_path, receiver_id):
         "serial": rx.get("serial"),
         "on_db": float(det.get("on_db", 10.0)),
         "off_db": float(det.get("off_db", 6.0)),
+        # These two were in the profile from the beginning and nothing read
+        # them; EventTracker took its own defaults, which happened to match, so
+        # editing the profile changed nothing and said nothing. Every setting
+        # the run row claims has to be one the run actually used.
+        "min_duration_s": float(det.get("min_duration_s", 0.12)),
+        "hang_s": float(det.get("hang_s", 0.30)),
+        # Not software-controlled — recorded because six months from now "why is
+        # this run 10 dB down on that one" should be answerable from the row
+        # rather than from memory. run_receivers has had columns for both since
+        # v2 and no real run has ever filled them in.
+        "attenuator_db": rx.get("attenuator_db"),
+        "antenna": rx.get("antenna"),
     }
 
 
@@ -1386,6 +1423,8 @@ def run(args):
     ppm = args.ppm if args.ppm is not None else cfg["ppm"]
     on_db = args.on_db if args.on_db is not None else cfg["on_db"]
     off_db = args.off_db if args.off_db is not None else cfg["off_db"]
+    min_duration_s = cfg["min_duration_s"]
+    hang_s = cfg["hang_s"]
     serial_want = args.serial or cfg["serial"]
     dwell_s = (args.dwell_seconds if args.dwell_seconds is not None
                else cfg["dwell_seconds"])
@@ -1401,7 +1440,7 @@ def run(args):
         soapy = simradio.SimulatedRadio(
             simradio.festival_scenario(), rate=rate_hz,
             center_hz=windows[0]["center_hz"], duration_s=args.simulate,
-            serial=f"SIM-{args.receiver_id.upper()}")
+            serial=f"SIM-{args.receiver_id.upper()}", announce=True)
         sdr = soapy
         SOAPY_SDR_RX, SOAPY_SDR_CF32 = soapy.SOAPY_SDR_RX, soapy.SOAPY_SDR_CF32
         print(f"SIMULATED radio — {args.simulate:.0f} s of synthetic signal per "
@@ -1452,7 +1491,8 @@ def run(args):
     # so every per-channel index means something different after a tune and none
     # of this state may carry across.
     grid = ChannelGrid(center, rate)
-    tracker = EventTracker(grid.n, frame_seconds, on_db=on_db, off_db=off_db)
+    tracker = EventTracker(grid.n, frame_seconds, on_db=on_db, off_db=off_db,
+                           min_duration=min_duration_s, hang=hang_s)
     floor_est = NoiseFloor(grid.n)
 
     print(f"receiver {args.receiver_id}: {rate/1e6:.3f} MSPS, gain {gain}, "
@@ -1463,6 +1503,8 @@ def run(args):
         + (f", {dwell_s:.0f} s each" if len(windows) > 1 else ""))
     print(f"{grid.n} channels on a {CHANNEL_HZ/1000:.2f} kHz grid, "
           f"{frame_seconds*1000:.1f} ms frames ({rate/fs:.0f}/sec)")
+    print(f"detect on {on_db:.1f} dB / off {off_db:.1f} dB, "
+          f"min {min_duration_s:.2f} s, hang {hang_s:.2f} s")
 
     # The window starts PRETRIGGER_SECONDS before the detector fired, so it has
     # to be that much longer to still contain ANALYZE_SECONDS of signal. Sizing
@@ -1476,6 +1518,13 @@ def run(args):
     print(f"ring buffer {ring_seconds*rate*8/1e6:.0f} MB\n")
 
     db.init_schema(args.db)
+    # db.connect opens with isolation_level=None, so every statement commits as
+    # it executes. There is nothing to batch and nothing to flush: the calls to
+    # conn.commit() that used to sit at the ends of these blocks were no-ops
+    # that read as transaction boundaries. The two-phase write cannot be atomic
+    # anyway — a row is inserted on keyup and updated a second later — and a
+    # half-written event is exactly what an unattended deck should leave behind
+    # when it loses power mid-transmission.
     conn = db.connect(args.db)
     session_start = time.time()
 
@@ -1483,7 +1532,9 @@ def run(args):
     db.register_receiver(conn, run_id, args.receiver_id,
                          serial=serial, sample_rate_hz=int(rate),
                          gain_db=gain, ppm_error=ppm,
-                         center_hz=int(center))
+                         center_hz=int(center),
+                         attenuator_db=cfg["attenuator_db"],
+                         antenna=cfg["antenna"])
     log = EventLog(conn, run_id, args.receiver_id)
     store = None
     if args.capture_dir:
@@ -1491,7 +1542,6 @@ def run(args):
                              max_mb=args.capture_mb, keep_iq=args.capture_iq)
         print(f"retaining {'audio + channel IQ' if args.capture_iq else 'audio'} "
               f"under {store.root}, budget {args.capture_mb:.0f} MB")
-    conn.commit()
     print(f"run {run_id}, serial {serial}, profile {args.profile}")
 
     stream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
@@ -1566,7 +1616,9 @@ def run(args):
             sdr.setFrequency(SOAPY_SDR_RX, 0, w["center_hz"])
             center = sdr.getFrequency(SOAPY_SDR_RX, 0)
             grid = ChannelGrid(center, rate)
-            tracker = EventTracker(grid.n, frame_seconds, on_db=on_db, off_db=off_db)
+            tracker = EventTracker(grid.n, frame_seconds, on_db=on_db,
+                                   off_db=off_db, min_duration=min_duration_s,
+                                   hang=hang_s)
             floor_est = NoiseFloor(grid.n)
             pending.clear()
             ring.reset()
@@ -1580,7 +1632,6 @@ def run(args):
             window_id = db.open_window(conn, run_id, args.receiver_id,
                                        int(center), int(rate), w["label"])
             log.window_id = window_id
-            conn.commit()
             deadline = time.time() + dwell_s if len(windows) > 1 else None
             print(f"\n== {center/1e6:.3f} MHz"
                   + (f" ({w['label']})" if w["label"] else "")
@@ -1717,9 +1768,6 @@ def run(args):
                     events_logged += 1
                     print(f"  {grid.freqs_hz[ch]/1e6:10.4f} MHz  ended, {duration:.2f} s")
 
-                if started.size or ended.size:
-                    conn.commit()
-
                 # ---- periodic stats ---------------------------------------------
                 if args.stats and time.time() - last_stat >= 15.0:
                     el = time.time() - last_stat
@@ -1751,7 +1799,6 @@ def run(args):
                           tracker.peak_snr[ch])
                 events_logged += 1      # closed by the retune, but still logged
             db.close_window(conn, window_id)
-            conn.commit()
 
             if stalled >= STALL_FRAMES and not args.simulate:
                 print(f"stream delivered nothing for {stalled} consecutive reads. "
@@ -1775,7 +1822,6 @@ def run(args):
             log.close(ch, window_t0 + ring.written / rate, None,
                       tracker.peak_snr[ch])
         db.end_run(conn, run_id)
-        conn.commit()
         conn.close()
         sdr.deactivateStream(stream)
         sdr.closeStream(stream)

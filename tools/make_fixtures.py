@@ -148,7 +148,13 @@ def build(rng):
     # Every transmission here is shorter than the analysis dwell, so the deck
     # detects them and learns nothing else about them. Tier 0 has never had a
     # fixture before, which meant the bottom rung of the ladder was untested.
-    for t0, t1, d in burst(rng, T0 + 300, 5, 2000, dur=(0.3, 1.0)):
+    #
+    # The upper bound tracks ANALYZE_SECONDS rather than being written out. It
+    # was hardcoded at 1.0 s when the dwell was 1.4 s; the dwell later dropped
+    # to 0.9 s and this channel quietly started arriving at tier 1, still
+    # described everywhere as the tier 0 case.
+    for t0, t1, d in burst(rng, T0 + 300, 5, 2000,
+                           dur=(0.3, ANALYZE_SECONDS - 0.05)):
         add(t0, t1, d, 464_500_000, content=None, tone_state="unknown")
 
     # --- The distant handheld. FRS 22 / GMRS 22, mostly heard badly. -------
