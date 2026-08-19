@@ -39,15 +39,15 @@ class TempDirCase(unittest.TestCase):
 def build_at_version(path, version):
     """A database at exactly `version`, built the way a real one would be.
 
-    schema.sql stamps v2 and the migrations carry it forward, so this is the only
-    honest way to produce an old database to upgrade from — hand-writing the old
-    shape would test a schema that never existed.
+    schema_v2.sql stamps v2 and the migrations carry it forward, so this is the
+    only honest way to produce an old database to upgrade from — hand-writing the
+    old shape would test a schema that never existed.
     """
     import migrate
 
     conn = sqlite3.connect(path, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.executescript((SRC / "schema.sql").read_text())
+    conn.executescript((SRC / "schema_v2.sql").read_text())
     if version > migrate.current_version(conn):
         migrate.apply(conn, version)
     assert migrate.current_version(conn) == version, (

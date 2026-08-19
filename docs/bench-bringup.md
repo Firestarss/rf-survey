@@ -268,14 +268,20 @@ whatever any bitmask says — and the clock is readable on every OS.
 Throttle registers are checked too if the kernel exposes them, but on Ubuntu they often
 aren't there. That's fine; you don't need them.
 
-### Run the selftest — the valuable bit
+### Run the selftest and the test suite — the valuable bit
+
+`--selftest` measures this machine: frame sizing, ring size, and whether two
+receivers fit in the CPU budget. It does not check correctness any more — that
+is `bash tools/run-tests.sh`, which is a fuller check than the selftest ever
+was. Phase 0 wants both, and `tools/deck-check.sh diag` runs both for you.
 
 ```bash
-python3 survey_prototype.py --selftest --rate 10e6
+python3 src/survey_prototype.py --selftest --rate 10e6
+bash tools/run-tests.sh
 ```
 
-No radio needed. Generates synthetic FM with known tones, checks the detection logic against
-them, and benchmarks the machine. About a minute.
+No radio needed for either. The selftest is seconds; the suite is a couple of
+minutes on a Pi.
 
 For reference, on a mid-range x86 core — a Pi 5 should land roughly 2.5–3× slower:
 
@@ -439,7 +445,7 @@ and you need more attenuation.
 python3 survey_prototype.py \
   --driver airspy --serial <SERIAL> \
   --freq 466.0e6 --rate 10e6 --gain 12 \
-  --ppm <MEASURED> --db bench.sqlite --receiver-id uhf --stats
+  --ppm <MEASURED> --db data/survey.sqlite --receiver-id uhf --stats
 ```
 
 Run it under `tmux` or `screen` so it survives your SSH session dropping:
@@ -461,7 +467,7 @@ tmux new -s survey        # detach with ctrl-b then d, return with: tmux attach 
 | Watching `--stats` while keying | overflow count stays zero |
 
 ```sql
-sqlite3 bench.sqlite "SELECT freq_hz/1e6, duration_s, peak_snr_db FROM events ORDER BY id DESC LIMIT 20;"
+sqlite3 data/survey.sqlite "SELECT freq_hz/1e6, duration_s, snr_db, deviation_hz FROM events ORDER BY id DESC LIMIT 20;"
 ```
 
 ### Gate 2
@@ -698,7 +704,7 @@ Run from the directory containing `survey_prototype.py`. Four modes:
 
 It finds the temperature sensor and throttle interface itself, so it works on Ubuntu and Pi
 OS alike, and writes per-sample data to a timestamped CSV alongside the summary. Set
-`DB=path` if your database isn't `bench.sqlite`.
+`DB=path` if your database isn't `data/survey.sqlite`.
 
 That one file answers most of what I'd otherwise ask.
 
@@ -743,7 +749,8 @@ Plus a plain running log:
 PHASE 0  2026-08-20  PASS
   ssh + serial console both working
   temp under load: 62C   get_throttled: 0x0
-  selftest: 54/54 tones, steady load 38% of one core, ~14 concurrent
+  selftest: steady load 38% of one core, ~14 concurrent
+  test suite: 201 passed
   note: dropped pciex1_gen=3, gen2 works fine
 
 PHASE 1  2026-08-24  PASS with question

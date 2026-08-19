@@ -153,7 +153,37 @@ class TestDwellGating(unittest.TestCase):
             np.zeros(1000, np.complex64), RATE, OFFSET))
 
 
+class TestDeviationAccuracy(unittest.TestCase):
+    """What the estimator reports against a known input.
+
+    The FRS/GMRS rule is a threshold on this number, so this is the whole
+    question. Synthetic only: it closes the estimator half of "measurement
+    accuracy unverified", not the receiver half, which needs a real transmitter
+    in Phase 3.
+    """
+
+    def test_reported_deviation_tracks_the_true_peak(self):
+        for voice_dev in (1500.0, 3000.0, 5000.0):
+            t = np.arange(int(RATE * 1.4)) / RATE
+            voice = (0.6 * np.sin(2 * np.pi * 900 * t)
+                     + 0.4 * np.sin(2 * np.pi * 1700 * t))
+            true_peak = voice_dev * float(np.max(np.abs(voice)))
+            got = proto.analyze_analog(
+                proto.make_fm(None, RATE, voice_dev=voice_dev),
+                RATE, OFFSET)["deviation_hz"]
+            self.assertAlmostEqual(
+                got / true_peak, 1.0, delta=0.15,
+                msg=f"true peak {true_peak:.0f} Hz reported as {got:.0f} Hz")
+
+
 class TestToneAndCode(unittest.TestCase):
+
+    def test_a_weak_tone_in_noise_is_still_identified(self):
+        # Low tone deviation and ten times the usual noise. The tone stage has
+        # to work on the quiet, distant handheld, not just the loud repeater.
+        got = proto.analyze_analog(
+            proto.make_fm(88.5, RATE, tone_dev=450.0, noise=0.5), RATE, OFFSET)
+        self.assertEqual(got["ctcss_hz"], 88.5)
 
     def test_confidence_never_exceeds_one(self):
         # events.confidence is CHECK-constrained to [0,1] and the Hann-gain

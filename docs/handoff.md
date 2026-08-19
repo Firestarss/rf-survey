@@ -17,8 +17,8 @@ src/survey_prototype.py   detector. Writes through db.py; owns no schema of its 
 src/dcs.py                Golay(23,12) and DCS codewords. Read its docstring first.
 src/simradio.py           synthetic Airspy, so the capture loop runs with no radio
 src/db.py                 connection, schema init, run lifecycle, log_event
-src/schema.sql            fresh-database shape. Stamps v2; migrations carry it forward.
-src/migrate.py            incremental migrations. Never re-paste schema.sql again.
+src/schema_v2.sql         the frozen v2 baseline. Not the current shape.
+src/migrate.py            v3-v8, and where every future change goes.
 src/bandplan.py           frequency -> label lookup
 src/enrich.py             tag, rollup, pair, score
 tools/seed_band_plan.py   FRS/GMRS/MURS/Part 90 channels + ARRL ham segments
@@ -42,7 +42,8 @@ python3 src/db.py data/survey.sqlite
 python3 tools/seed_band_plan.py data/survey.sqlite
 python3 tools/make_fixtures.py data/survey.sqlite --wipe
 python3 src/enrich.py data/survey.sqlite --profile profiles/festival.yaml
-python3 src/survey_prototype.py --selftest
+python3 src/survey_prototype.py --selftest      # sizing and speed only
+bash tools/run-tests.sh                        # correctness
 ```
 
 And the capture loop itself, still with no hardware — this drives the detector, the
@@ -130,7 +131,7 @@ before returning. The rebuild also added `deviation_hz`, `ctcss_dev_hz`, `overlo
 `tone_state` CHECK that migration 3 could not add via ALTER, `channels.deviation_hz` and
 `run_receivers.center_hz`.
 
-`schema.sql` stays v2-shaped. It stamps v2 and `init_schema()` replays every migration on
+`schema_v2.sql` stays v2-shaped. It stamps v2 and `init_schema()` replays every migration on
 top, so adding a column there too makes the matching ALTER fail with "duplicate column
 name" on every fresh build. The two comments claiming otherwise are corrected. Fresh and
 upgraded databases were diffed schema-for-schema and are identical.
@@ -138,7 +139,7 @@ upgraded databases were diffed schema-for-schema and are identical.
 **The prototype conforms.** `open_db()` and the private `coverage` table are gone.
 `coverage` said nothing `runs` and `run_receivers` do not, once `center_hz` existed, and
 nothing joined to it. The two-phase write lives in an `EventLog` class holding every
-field mapping in one place, which is what lets `--selftest` drive the real code path
+field mapping in one place, which is what lets the tests drive the real code path
 against a temporary database with no radio attached. `--receiver-id` is now
 `choices=("uhf","vhf")` with no default, `--db` defaults to `data/survey.sqlite`, and
 `--profile` is snapshotted verbatim into the run. The serial is read back off the device
@@ -221,7 +222,7 @@ Five changes were not in the original section 3 and are called out rather than b
   `min_duration` (0.12 s) after the signal actually started and the event closed `hang`
   (0.30 s) after it stopped, inflating every duration by ~0.42 s and every airtime total
   with it. `EventTracker` now keeps recent frame boundaries and reports both edges where
-  they happened. Verified in `--selftest`: a 0.80 s signal logs as 0.80 s.
+  they happened. Verified in `tests/test_tracker.py`: a 0.80 s signal logs as 0.80 s.
 
 - **`FREQ_BIN_HZ` is 6250, but the bin is no longer what gets reported.** Binning at
   6250 groups measurements correctly, but its grid has arbitrary phase against real
@@ -405,8 +406,11 @@ logging events entirely, which is a far worse failure than losing recordings.
 
 ### Supervision
 
-`systemd/rfsurvey@.service` runs one instance per receiver. `Restart=always`,
-because under a supervisor a clean exit is as unexpected as a crash. `KillSignal`
+`systemd/rfsurvey@.service` runs one instance per receiver. `Restart=on-failure`,
+not `always`: the survey is something you start and stop, the Pi has other uses,
+and a deck that comes back by itself after you deliberately stopped it is worse
+than one that does not run at all. A crash or a non-zero exit still restarts —
+that is the case worth recovering. `KillSignal`
 is SIGINT so the loop closes its in-flight events and coverage window rather than
 dying mid-transaction. The capture loop now counts consecutive empty reads and
 exits non-zero after `STALL_FRAMES`, because a wedged USB endpoint does not recover
@@ -489,7 +493,7 @@ for Massachusetts. Every row carries a `source` column; re-seeding replaces them
 
 **Deviation measurement accuracy is unverified against real signals.** The FRS/GMRS rule
 depends on it. The *estimator* is now checked against known synthetic deviations in
-`--selftest` and lands within 4% of true peak, and its weak-signal behaviour is
+`tests/test_analyze.py` and lands within 15% of true peak, and its weak-signal behaviour is
 characterised in section 3 — but nothing has measured a real transmitter through a real
 receiver. Note how little that guarantee was worth by itself: the estimator was
 accurate to 4% in isolation while reporting pure noise for every event the deck

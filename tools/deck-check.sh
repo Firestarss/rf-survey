@@ -297,12 +297,21 @@ diag() {
   python3 -c "import numpy, scipy; print('numpy', numpy.__version__, '/ scipy', scipy.__version__)" 2>&1
   python3 -c "import numpy; numpy.show_config()" 2>&1 | head -20
 
-  sep "selftest"
+  sep "selftest — will this machine keep up"
   if [ -f "$PROTO" ]; then
-    echo "running $PROTO"
     python3 "$PROTO" --selftest --rate 10e6 2>&1
   else
     echo "$PROTO not found under $(pwd) — this script must live in tools/"
+  fi
+
+  sep "test suite — is the software correct"
+  # --selftest measures this machine; the suite decides whether the code is
+  # right. Phase 0 wants both, and the two used to be one command answering
+  # only the first.
+  if [ -f tools/run-tests.sh ]; then
+    RFSURVEY_SKIP_SLOW="${RFSURVEY_SKIP_SLOW:-}" bash tools/run-tests.sh 2>&1 | tail -20
+  else
+    echo "tools/run-tests.sh not found"
   fi
 
   sep "database summary"

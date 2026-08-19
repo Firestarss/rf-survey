@@ -88,6 +88,17 @@ class TestLogEvent(DbCase):
         stored = self.conn.execute("SELECT * FROM events WHERE id=?", (row,)).fetchone()
         self.assertIsNone(stored["deviation_hz"])
 
+    def test_a_perfect_capture_ratio_is_accepted(self):
+        # confidence is CHECK-constrained to [0,1] and the tone capture ratio
+        # reaches exactly 1.0 on a clean strong signal — the Hann-gain
+        # approximation overshoots and analyze_analog clamps it there. If the
+        # CHECK were exclusive, the cleanest possible CTCSS signal, which is the
+        # most common thing at a festival, would be the one that throws.
+        row = self.log(confidence=1.0, ctcss_hz=141.3, tone_state="ctcss")
+        stored = self.conn.execute("SELECT confidence FROM events WHERE id=?",
+                                   (row,)).fetchone()
+        self.assertEqual(stored["confidence"], 1.0)
+
     def test_schema_checks_still_apply(self):
         with self.assertRaises(sqlite3.IntegrityError):
             self.log(confidence=1.5)

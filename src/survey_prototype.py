@@ -7,9 +7,9 @@ mode and any subaudible tone, and logs it to SQLite.
 
 Two modes:
 
-  --selftest      Runs without any radio attached. Checks the tone detection
-                  against synthetic signals and benchmarks this machine so you
-                  know whether it will keep up. Do this first.
+  --selftest      Sizes and benchmarks this machine, with no radio attached,
+                  so you know whether it can keep up with two receivers.
+                  Correctness is `bash tools/run-tests.sh`. Do both first.
 
   (normal)        Opens a radio and runs for real.
 
@@ -19,7 +19,7 @@ Examples:
 
     python3 survey_prototype.py --driver airspy --serial 0x1234ABCD \
         --freq 466.0e6 --rate 10e6 --gain 12 --ppm 0.4 \
-        --db bench.sqlite --receiver-id uhf --stats
+        --db data/survey.sqlite --receiver-id uhf --stats
 
 Needs: numpy, scipy, and (for real use) SoapySDR with python3 bindings.
 """
@@ -968,9 +968,10 @@ class EventLog:
     NULL — are the ones worth keeping. Migration 5 made both nullable for this.
 
     Every field mapping between `analyze_analog()` and the schema lives here and
-    nowhere else, so `--selftest` can drive the exact code path the field deck
-    uses against a temporary database with no radio attached. That is the only
-    way to test this wiring before the hardware arrives.
+    nowhere else, so the tests can drive the exact code path the field deck uses
+    against a temporary database with no radio attached. That is the only way to
+    test this wiring before the hardware arrives — see tests/test_endtoend.py,
+    which runs the real capture loop against a synthetic radio.
     """
 
     def __init__(self, conn, run_id, receiver_id):
@@ -1096,263 +1097,28 @@ def make_fm(tone_hz, rate, dur=1.4, offset=12500.0, tone_dev=700.0,
 
 
 def selftest(rate, verbose=True):
-    """Correctness and speed, with no hardware. Returns True if all checks pass."""
-    ok = True
+    """Will this machine keep up? Sizing and speed, with no hardware attached.
+
+    Correctness is not checked here any more. It used to be — 200 lines sweeping
+    tones, deviation, event timing, the DCS table, the analysis trim and a
+    database round trip — and every one of those now has a test module that
+    checks it harder and names the failure when it breaks. Two copies of the same
+    assertions is one copy that gets updated. Run `bash tools/run-tests.sh` for
+    correctness; this answers the different question of whether the deck can
+    process two radios in real time, which no unit test can answer because the
+    answer is a property of the machine it is running on.
+    """
     print(f"\n=== self test @ {rate/1e6:.1f} MSPS ===\n")
 
     fs = frame_size(rate)
     grid = ChannelGrid(466.0e6, rate)
+    ring_s = ANALYZE_SECONDS + PRETRIGGER_SECONDS + RING_SLACK_SECONDS
     print(f"  frame size        {fs} samples = {fs/rate*1000:.1f} ms"
           f"  ({rate/fs:.0f} frames/sec)")
     print(f"  channels watched  {grid.n}")
-    ring_s = ANALYZE_SECONDS + PRETRIGGER_SECONDS + RING_SLACK_SECONDS
-    print(f"  ring buffer       {ring_s*rate*8/1e6:.0f} MB\n")
+    print(f"  ring buffer       {ring_s*rate*8/1e6:.0f} MB per receiver\n")
 
-    # --- correctness -------------------------------------------------------
-    # Run these at 2.4 MSPS regardless of the target rate. The tone logic
-    # decimates everything to ~24 kHz and then ~2 kHz before it looks at
-    # anything, so the answers are rate-independent — but generating 1.4 s of
-    # synthetic signal at 10 MSPS costs 112 MB and a couple of seconds each,
-    # and there are 70 test cases. Low rate here keeps the check under a minute.
-    crate = 2.4e6
-    print("  tone identification  (checked at 2.4 MSPS — logic is rate-independent)")
-    bad = [w for w in CTCSS_TONES
-           if analyze_analog(make_fm(w, crate), crate, 12500.0)["ctcss_hz"] != w]
-    print(f"    {len(CTCSS_TONES)-len(bad)}/{len(CTCSS_TONES)} standard tones correct")
-    ok &= not bad
-    if bad and verbose:
-        print(f"    FAILED: {bad}")
-
-    r = analyze_analog(make_fm(88.5, crate, tone_dev=450.0, noise=0.5), crate, 12500.0)
-    weak_ok = r["ctcss_hz"] == 88.5
-    print(f"    weak tone in noise: {'ok' if weak_ok else 'FAILED'}")
-    ok &= weak_ok
-
-    dcs_bad = 0
-    for seed in range(12):
-        word = np.random.default_rng(seed).integers(0, 2, 23) * 2 - 1
-        r = analyze_analog(make_fm(None, crate, dcs_word=word), crate, 12500.0)
-        if r["ctcss_hz"] is not None or not r["dcs_suspected"]:
-            dcs_bad += 1
-    print(f"    {12-dcs_bad}/12 DCS codewords correctly rejected")
-    ok &= dcs_bad == 0
-
-    r = analyze_analog(make_fm(None, crate), crate, 12500.0)
-    clean = r["ctcss_hz"] is None and not r["dcs_suspected"]
-    print(f"    no-tone carrier: {'clean' if clean else 'FALSE POSITIVE'}")
-    ok &= clean
-
-    # --- deviation ---------------------------------------------------------
-    # The FRS/GMRS rule is a threshold on this number, so what it reports
-    # against a known input is the whole question. Synthetic only: this closes
-    # the estimator half of "measurement accuracy unverified", not the receiver
-    # half, which needs a real transmitter in Phase 3.
-    print("\n  deviation estimate  (peak, p99 of |inst - mean|)")
-    dev_ok = True
-    for voice_dev in (1500.0, 3000.0, 5000.0):
-        t = np.arange(int(crate * 1.4)) / crate
-        voice = 0.6 * np.sin(2 * np.pi * 900 * t) + 0.4 * np.sin(2 * np.pi * 1700 * t)
-        true_peak = voice_dev * float(np.max(np.abs(voice)))
-        got = analyze_analog(make_fm(None, crate, voice_dev=voice_dev),
-                             crate, 12500.0)["deviation_hz"]
-        err = (got - true_peak) / true_peak
-        hit = abs(err) <= 0.15
-        dev_ok &= hit
-        print(f"    true peak {true_peak:6.0f} Hz -> reported {got:6.0f} Hz "
-              f"({err*100:+5.1f}%) {'ok' if hit else 'FAILED'}")
-    ok &= dev_ok
-
-    # --- event timing ------------------------------------------------------
-    # A detection is declared min_duration after the signal starts and closed
-    # hang seconds after it stops. Both edges must be reported where they
-    # happened; otherwise every duration and every airtime total is inflated.
-    print("\n  event timing")
-    fsec, fsamp = 0.04, 1000
-    tr = EventTracker(1, fsec, min_duration=0.12, hang=0.30)
-    hot_from, hot_to = 10, 30           # hot for frames 10..29 = 0.80 s
-    got_start = got_end = None
-    for i in range(60):
-        snr = np.array([20.0 if hot_from <= i < hot_to else 0.0])
-        started, ended = tr.update(snr, i * fsamp)
-        if len(started):
-            got_start = tr.start_sample[0]
-        if len(ended):
-            got_end = tr.last_end_sample
-    dur = (got_end - got_start) / (fsamp / fsec)
-    timing_ok = (got_start == hot_from * fsamp and got_end == hot_to * fsamp
-                 and abs(dur - 0.80) < 1e-9)
-    print(f"    signal 0.80 s -> logged {dur:.2f} s "
-          f"(start frame {got_start//fsamp}, end frame {got_end//fsamp}) "
-          f"{'ok' if timing_ok else 'FAILED'}")
-    ok &= timing_ok
-
-    # --- database round trip -----------------------------------------------
-    # Drives the exact field mapping the field deck uses, against a real
-    # schema. With no radio this is the only thing standing between a wiring
-    # mistake and a festival that logs nothing.
-    print("\n  database round trip")
-    db_ok = True
-    root = pathlib.Path(__file__).resolve().parent.parent
-    with tempfile.TemporaryDirectory() as tmp:
-        path = str(pathlib.Path(tmp) / "selftest.sqlite")
-        db.init_schema(path)
-        conn = db.connect(path)
-        run_id = db.start_run(conn, str(root / "profiles" / "festival.yaml"),
-                              notes="selftest")
-        db.register_receiver(conn, run_id, "uhf", serial="SELFTEST",
-                             sample_rate_hz=int(crate), center_hz=466_000_000)
-        log = EventLog(conn, run_id, "uhf")
-
-        freq = 462_675_000
-        log.start(0, 1000.0, freq, overload=True)
-        log.analysed(0, analyze_analog(make_fm(88.5, crate), crate, 12500.0), freq)
-        log.close(0, 1002.0, 2.0, 41.5)
-
-        # In-flight: detected, analysed, never closed — the row a power cut
-        # leaves behind.
-        log.start(1, 1010.0, 462_650_000, overload=False)
-        log.analysed(1, analyze_analog(make_fm(None, crate), crate, 12500.0),
-                     462_650_000)
-
-        closed = conn.execute(
-            "SELECT * FROM events WHERE freq_hz = ?", (freq,)).fetchone()
-        inflight = conn.execute(
-            "SELECT * FROM events WHERE freq_hz = ?", (462_650_000,)).fetchone()
-
-        checks = [
-            ("t_start/t_end kept", closed["t_start"] == 1000.0
-                                   and closed["t_end"] == 1002.0),
-            ("duration recorded", closed["duration_s"] == 2.0),
-            ("snr -> snr_db", closed["snr_db"] == 41.5),
-            ("ctcss identified", closed["ctcss_hz"] == 88.5),
-            ("tone_state ctcss", closed["tone_state"] == "ctcss"),
-            ("confidence in [0,1]", 0.0 <= closed["confidence"] <= 1.0),
-            ("deviation measured", closed["deviation_hz"] > 1000.0),
-            # Asserting freq_raw_hz != freq_hz was wrong: it demanded a
-            # measurement error. Trimming the lead-in noise made the estimate
-            # exact and the check failed on an improvement. What matters is that
-            # the raw value is recorded and plausible.
-            ("freq snapped, raw kept", closed["freq_hz"] == freq
-                                       and closed["freq_raw_hz"] is not None
-                                       and abs(closed["freq_raw_hz"] - freq) < 2000),
-            ("overload flagged", closed["overload"] == 1),
-            ("in-flight t_end NULL", inflight["t_end"] is None),
-            ("in-flight duration NULL", inflight["duration_s"] is None),
-            ("in-flight tone none", inflight["tone_state"] == "none"),
-            ("no dangling refs",
-             not conn.execute("PRAGMA foreign_key_check").fetchall()),
-        ]
-        for name, hit in checks:
-            db_ok &= hit
-            print(f"    {name:26s} {'ok' if hit else 'FAILED'}")
-
-        # Every standard tone through the real INSERT path. The CHECK on
-        # confidence is [0,1] and the capture ratio overshoots without its
-        # clamp, so this is the case that would throw on a clean strong signal.
-        try:
-            for i, w in enumerate(CTCSS_TONES):
-                r = analyze_analog(make_fm(w, crate, noise=0.01), crate, 12500.0)
-                log.start(100 + i, 2000.0 + i, 462_700_000)
-                log.analysed(100 + i, r, 462_700_000)
-            worst = conn.execute("SELECT MAX(confidence) FROM events").fetchone()[0]
-            print(f"    {len(CTCSS_TONES)} tones inserted, max confidence "
-                  f"{worst:.6f}   ok")
-        except Exception as exc:
-            db_ok = False
-            print(f"    tone insert path         FAILED: {exc}")
-        conn.close()
-    ok &= db_ok
-
-    # --- DCS decoding ------------------------------------------------------
-    print(f"\n  DCS decoding  ({len(dcs_mod.STANDARD_CODES)} standard codes, "
-          f"generator 0x{dcs_mod.GOLAY_POLY:X})")
-    dcs_ok = True
-    probe = sorted(dcs_mod.STANDARD_CODES)[:4]
-    for code in probe:
-        bits = np.array([1.0 if b else -1.0
-                         for b in dcs_mod.bit_sequence(code, "N")])
-        r = analyze_analog(make_fm(None, crate, dur=1.4, dcs_word=bits,
-                                   noise=0.5), crate, 12500.0)
-        hit = r["dcs_code"] == int(code) and r["dcs_polarity"] == "N"
-        dcs_ok &= hit
-        shown = "none" if r["dcs_code"] is None else f"{r['dcs_code']:03d}"
-        print(f"    code {code} -> {shown}{r['dcs_polarity'] or ''} "
-              f"({r['dcs_errors']} bit err)  {'ok' if hit else 'FAILED'}")
-    # A CTCSS tone must never come back as a DCS code. Sliced at 134.4 bps a
-    # pure tone is periodic, so every 23-bit window agrees with every other —
-    # which is exactly the evidence decode_dcs uses. This is a regression guard:
-    # with the DCS decode run ahead of the capture-ratio test, tone 110.9 Hz
-    # decoded as DCS 243 and 254.1 Hz as DCS 031.
-    tone_as_dcs = [w for w in CTCSS_TONES
-                   if analyze_analog(make_fm(w, crate), crate,
-                                     12500.0)["dcs_code"] is not None]
-    print(f"    CTCSS tones decoded as DCS: {len(tone_as_dcs)} (must be 0)"
-          + (f"  {tone_as_dcs}" if tone_as_dcs else ""))
-    dcs_ok &= not tone_as_dcs
-
-    # Sending a code inverted is the same waveform as sending its documented
-    # partner normally, so that is the right answer rather than a misread.
-    inv_ok = True
-    for code in sorted(dcs_mod.STANDARD_CODES)[:3]:
-        bits = np.array([1.0 if b else -1.0
-                         for b in dcs_mod.bit_sequence(code, "I")])
-        got = analyze_analog(make_fm(None, crate, dur=1.4, dcs_word=bits),
-                             crate, 12500.0)["dcs_code"]
-        hit = got == int(dcs_mod.INVERTED_PAIR[code])
-        inv_ok &= hit
-        shown = "none" if got is None else f"{got:03d}"
-        print(f"    {code} sent inverted -> {shown} "
-              f"(= {dcs_mod.INVERTED_PAIR[code]}, its pair)  "
-              f"{'ok' if hit else 'FAILED'}")
-    dcs_ok &= inv_ok
-    ok &= dcs_ok
-
-    # --- analysis window trim ----------------------------------------------
-    # The capture window starts before the transmission does. An FM
-    # discriminator fed noise returns values spread over +/- audio_fs/2, so
-    # without trimming, p99 reports the noise figure and not the signal.
-    print("\n  lead-in noise rejection")
-    trim_ok = True
-    for lead in (0.0, 0.3, 0.6):
-        n_lead = int(lead * crate)
-        sig = make_fm(None, crate, dur=1.0, voice_dev=2400.0, noise=0.05)
-        pad = (np.random.default_rng(3).standard_normal(n_lead)
-               + 1j * np.random.default_rng(4).standard_normal(n_lead))
-        iq = np.concatenate([pad.astype(np.complex64) * 0.05, sig])
-        got = analyze_analog(iq, crate, 12500.0)["deviation_hz"]
-        hit = 2000 < got < 4000
-        trim_ok &= hit
-        print(f"    {lead:.1f}s of noise before a 2.4 kHz signal -> "
-              f"{got:6.0f} Hz  {'ok' if hit else 'FAILED (reads as noise)'}")
-    ok &= trim_ok
-
-    # --- noise floor must not swallow a long transmission -------------------
-    # The floor is a low percentile over FLOOR_FRAMES of history. A carrier that
-    # stays up long enough to fill (100-FLOOR_PCTILE)% of that history drags the
-    # floor up to meet itself and the detector calls the transmission over while
-    # it is still going.
-    print("\n  sustained carrier")
-    fl = NoiseFloor(4)
-    tr = EventTracker(4, 0.0131)
-    quiet = np.full(4, -90.0)
-    loud = np.array([-60.0, -90.0, -90.0, -90.0])
-    active = None
-    closed_at = None
-    for i in range(900):                      # ~12 s
-        power = loud if i >= 150 else quiet
-        floor = fl.update(power, active=active)
-        if floor is None:
-            continue
-        started, ended = tr.update(power - floor, i * 1000)
-        active = tr.state == EventTracker.ACTIVE
-        if len(ended) and closed_at is None:
-            closed_at = (i - 150) * 0.0131
-    held = closed_at is None
-    print(f"    10 s carrier held open: {'yes' if held else f'NO — closed after {closed_at:.2f} s'}")
-    ok &= held
-
-    # --- speed -------------------------------------------------------------
-    print("\n  speed on this machine")
+    print("  speed on this machine")
 
     def bench(fn, k=5):
         fn()
@@ -1389,10 +1155,15 @@ def selftest(rate, verbose=True):
           f"({steady/4:.1f}% of four)")
     print(f"    simultaneous transmissions, 4 cores: about {concurrent*4*0.7:.0f}")
 
-    print(f"\n  verdict: {'ALL CHECKS PASS' if ok else 'FAILURES ABOVE'}")
-    if steady > 60:
-        print("  WARNING: steady load is high. Two radios will not fit on this machine.")
-    print()
+    # The deck runs two receivers. The verdict is whether that fits, which is
+    # the one thing this can decide and a unit test cannot.
+    ok = steady * 2 < 100.0
+    if ok:
+        print(f"\n  verdict: PASS — two receivers need {steady*2:.1f}% of one core")
+    else:
+        print(f"\n  verdict: FAIL — two receivers need {steady*2:.1f}% of one "
+              f"core and will not keep up on this machine")
+    print("  correctness is `bash tools/run-tests.sh`\n")
     return ok
 
 
@@ -1454,163 +1225,434 @@ def load_receiver_config(profile_path, receiver_id):
     }
 
 
-def run(args):
+def resolve_settings(args):
+    """The profile, with command-line overrides applied. What the run will use.
+
+    The profile is the configuration and the command line overrides it only
+    where something was actually typed. Keeping the two in one place matters
+    because `runs.profile_yaml` snapshots the profile verbatim: a run that
+    records a configuration it did not follow is worse than one that records
+    none, because the snapshot reads as evidence.
+    """
     cfg = load_receiver_config(args.profile, args.receiver_id)
 
-    # The profile is the configuration; the command line overrides it only where
-    # something was actually typed. Anything still None below came from the
-    # profile, which is what the run row will claim.
-    rate_hz = args.rate if args.rate is not None else cfg["sample_rate"]
-    gain = args.gain if args.gain is not None else cfg["gain"]
-    ppm = args.ppm if args.ppm is not None else cfg["ppm"]
-    on_db = args.on_db if args.on_db is not None else cfg["on_db"]
-    off_db = args.off_db if args.off_db is not None else cfg["off_db"]
-    min_duration_s = cfg["min_duration_s"]
-    hang_s = cfg["hang_s"]
-    serial_want = args.serial or cfg["serial"]
-    dwell_s = (args.dwell_seconds if args.dwell_seconds is not None
-               else cfg["dwell_seconds"])
-    windows = cfg["windows"]
+    def override(name, key):
+        given = getattr(args, name)
+        return cfg[key] if given is None else given
+
+    cfg["rate"] = override("rate", "sample_rate")
+    cfg["gain"] = override("gain", "gain")
+    cfg["ppm"] = override("ppm", "ppm")
+    cfg["on_db"] = override("on_db", "on_db")
+    cfg["off_db"] = override("off_db", "off_db")
+    cfg["dwell_s"] = override("dwell_seconds", "dwell_seconds")
+    cfg["serial_want"] = args.serial or cfg["serial"]
+
     if args.freq is not None:                       # explicit override parks it
-        windows = [dict(center_hz=int(args.freq), label="--freq")]
-    if len(windows) > 1 and not dwell_s:
-        raise SystemExit(f"receiver {args.receiver_id} has {len(windows)} windows "
-                         f"but no dwell_seconds — it would never rotate")
+        cfg["windows"] = [dict(center_hz=int(args.freq), label="--freq")]
+    if len(cfg["windows"]) > 1 and not cfg["dwell_s"]:
+        raise SystemExit(f"receiver {args.receiver_id} has {len(cfg['windows'])} "
+                         f"windows but no dwell_seconds — it would never rotate")
+    return cfg
 
-    if args.simulate:
-        import simradio
-        soapy = simradio.SimulatedRadio(
-            simradio.festival_scenario(), rate=rate_hz,
-            center_hz=windows[0]["center_hz"], duration_s=args.simulate,
-            serial=f"SIM-{args.receiver_id.upper()}", announce=True)
-        sdr = soapy
-        SOAPY_SDR_RX, SOAPY_SDR_CF32 = soapy.SOAPY_SDR_RX, soapy.SOAPY_SDR_CF32
-        print(f"SIMULATED radio — {args.simulate:.0f} s of synthetic signal per "
-              f"window, no hardware involved")
-    else:
-        import SoapySDR
-        from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32
-        soapy = SoapySDR
-        spec = {"driver": args.driver}
-        if serial_want:
-            spec["serial"] = serial_want
-        sdr = SoapySDR.Device(spec)
 
-    sdr.setSampleRate(SOAPY_SDR_RX, 0, rate_hz)
-    sdr.setFrequency(SOAPY_SDR_RX, 0, windows[0]["center_hz"])
-    try:
-        sdr.setGainMode(SOAPY_SDR_RX, 0, False)     # AGC off — non-negotiable
-    except Exception:
-        print("warning: could not disable AGC", file=sys.stderr)
-    sdr.setGain(SOAPY_SDR_RX, 0, gain)
-    if ppm:
+class Radio:
+    """The SoapySDR surface this program uses, real or simulated.
+
+    Wrapping it keeps `SOAPY_SDR_RX, 0` out of the capture loop, and gives
+    --simulate one place to substitute itself rather than a branch at every
+    call. It is also the definition of what `simradio` has to implement.
+    """
+
+    def __init__(self, args, settings):
+        if args.simulate:
+            import simradio
+            self.api = simradio.SimulatedRadio(
+                simradio.festival_scenario(), rate=settings["rate"],
+                center_hz=settings["windows"][0]["center_hz"],
+                duration_s=args.simulate,
+                serial=f"SIM-{args.receiver_id.upper()}", announce=True)
+            self.dev = self.api
+            print(f"SIMULATED radio — {args.simulate:.0f} s of synthetic signal "
+                  f"per window, no hardware involved")
+        else:
+            import SoapySDR
+            self.api = SoapySDR
+            spec = {"driver": args.driver}
+            if settings["serial_want"]:
+                spec["serial"] = settings["serial_want"]
+            self.dev = SoapySDR.Device(spec)
+
+        self.RX = self.api.SOAPY_SDR_RX
+        self.OVERFLOW = self.api.SOAPY_SDR_OVERFLOW
+        self._cf32 = self.api.SOAPY_SDR_CF32
+        self.stream = None
+
+    def configure(self, settings):
+        """Apply the settings. Returns the rate and centre the device accepted."""
+        self.dev.setSampleRate(self.RX, 0, settings["rate"])
+        self.dev.setFrequency(self.RX, 0, settings["windows"][0]["center_hz"])
         try:
-            sdr.setFrequencyCorrection(SOAPY_SDR_RX, 0, ppm)
+            self.dev.setGainMode(self.RX, 0, False)  # AGC off — non-negotiable
         except Exception:
-            print("warning: driver rejected ppm correction", file=sys.stderr)
+            print("warning: could not disable AGC", file=sys.stderr)
+        self.dev.setGain(self.RX, 0, settings["gain"])
+        if settings["ppm"]:
+            try:
+                self.dev.setFrequencyCorrection(self.RX, 0, settings["ppm"])
+            except Exception:
+                print("warning: driver rejected ppm correction", file=sys.stderr)
+        return (self.dev.getSampleRate(self.RX, 0),
+                self.dev.getFrequency(self.RX, 0))
 
-    rate = sdr.getSampleRate(SOAPY_SDR_RX, 0)
-    center = sdr.getFrequency(SOAPY_SDR_RX, 0)
-    fs = frame_size(rate)
+    def serial(self, fallback):
+        """The serial read back off the device, not the one that was asked for.
 
-    # Read the serial back off the device rather than trusting --serial. If the
-    # radio was addressed by driver alone this is the only record of which of
-    # the two it actually was, and run_receivers.serial is the identity every
-    # later row is interpreted against.
-    try:
-        serial = sdr.getHardwareInfo()["serial"]
-    except Exception:
-        serial = serial_want
-    if not serial:
-        print("warning: no serial from device and none given — this run cannot "
-              "prove which radio produced it", file=sys.stderr)
-        serial = "unknown"
-
-    frame_seconds = fs / rate
-    overload = OverloadMonitor()
-
-    # Rebuilt on every retune: the channel grid is defined relative to the centre,
-    # so every per-channel index means something different after a tune and none
-    # of this state may carry across.
-    grid = ChannelGrid(center, rate)
-    tracker = EventTracker(grid.n, frame_seconds, on_db=on_db, off_db=off_db,
-                           min_duration=min_duration_s, hang=hang_s)
-    floor_est = NoiseFloor(grid.n)
-
-    print(f"receiver {args.receiver_id}: {rate/1e6:.3f} MSPS, gain {gain}, "
-          f"ppm {ppm}")
-    print(f"{cfg['mode']}: " + ", ".join(
-        f"{w['center_hz']/1e6:.3f} MHz" + (f" ({w['label']})" if w['label'] else "")
-        for w in windows)
-        + (f", {dwell_s:.0f} s each" if len(windows) > 1 else ""))
-    print(f"{grid.n} channels on a {CHANNEL_HZ/1000:.2f} kHz grid, "
-          f"{frame_seconds*1000:.1f} ms frames ({rate/fs:.0f}/sec)")
-    print(f"detect on {on_db:.1f} dB / off {off_db:.1f} dB, "
-          f"min {min_duration_s:.2f} s, hang {hang_s:.2f} s")
-
-    # The window starts PRETRIGGER_SECONDS before the detector fired, so it has
-    # to be that much longer to still contain ANALYZE_SECONDS of signal. Sizing
-    # it at ANALYZE_SECONDS flat leaves only 0.6 s of carrier once the trim in
-    # analyze_analog has dropped the lead-in — below MIN_TONE_SECONDS, so no
-    # transmission of any length ever got its tone identified.
-    pretrigger = int(PRETRIGGER_SECONDS * rate)
-    analyze_samples = int(ANALYZE_SECONDS * rate) + pretrigger
-    ring_seconds = ANALYZE_SECONDS + PRETRIGGER_SECONDS + RING_SLACK_SECONDS
-    ring = Ring(int(ring_seconds * rate))
-    print(f"ring buffer {ring_seconds*rate*8/1e6:.0f} MB\n")
-
-    db.init_schema(args.db)
-    # db.connect opens with isolation_level=None, so every statement commits as
-    # it executes. There is nothing to batch and nothing to flush: the calls to
-    # conn.commit() that used to sit at the ends of these blocks were no-ops
-    # that read as transaction boundaries. The two-phase write cannot be atomic
-    # anyway — a row is inserted on keyup and updated a second later — and a
-    # half-written event is exactly what an unattended deck should leave behind
-    # when it loses power mid-transmission.
-    conn = db.connect(args.db)
-    session_start = time.time()
-
-    run_id = db.start_run(conn, args.profile, notes=args.notes)
-    db.register_receiver(conn, run_id, args.receiver_id,
-                         serial=serial, sample_rate_hz=int(rate),
-                         gain_db=gain, ppm_error=ppm,
-                         center_hz=int(center),
-                         attenuator_db=cfg["attenuator_db"],
-                         antenna=cfg["antenna"])
-    log = EventLog(conn, run_id, args.receiver_id)
-    store = None
-    if args.capture_dir:
-        store = CaptureStore(args.capture_dir, run_id,
-                             max_mb=args.capture_mb, keep_iq=args.capture_iq)
-        print(f"retaining {'audio + channel IQ' if args.capture_iq else 'audio'} "
-              f"under {store.root}, budget {args.capture_mb:.0f} MB")
-    print(f"run {run_id}, serial {serial}, profile {args.profile}")
-
-    stream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
-    sdr.activateStream(stream)
-
-    chunk = np.empty(fs, np.complex64)
-    periodogram = Periodogram(rate)
-
-    pending = {}
-    min_analyze_samples = int(MIN_ANALYZE_SECONDS * rate)
-
-    def analyse(ch, nsamples):
-        """Analyse `ch` over nsamples from where its capture started.
-
-        Removes ch from `pending` either way — one analysis per event. Returns
-        the result dict, or None if there was nothing worth analysing.
+        If the radio was addressed by driver alone this is the only record of
+        which of the two it actually was, and `run_receivers.serial` is the
+        identity every later row is interpreted against.
         """
-        start = pending.pop(ch, None)
-        if start is None or ch not in log.open_rows or nsamples < min_analyze_samples:
+        try:
+            got = self.dev.getHardwareInfo()["serial"]
+        except Exception:
+            got = fallback
+        if not got:
+            print("warning: no serial from device and none given — this run "
+                  "cannot prove which radio produced it", file=sys.stderr)
+            return "unknown"
+        return got
+
+    def tune(self, center_hz):
+        self.dev.setFrequency(self.RX, 0, center_hz)
+        return self.dev.getFrequency(self.RX, 0)
+
+    def start(self):
+        self.stream = self.dev.setupStream(self.RX, self._cf32)
+        self.dev.activateStream(self.stream)
+
+    def read(self, buf, n):
+        """Samples into `buf`. Returns the count, or <= 0 for a timeout."""
+        return self.dev.readStream(self.stream, [buf], n, timeoutUs=2_000_000).ret
+
+    def stop(self):
+        self.dev.deactivateStream(self.stream)
+        self.dev.closeStream(self.stream)
+
+
+class Detector:
+    """Detection state for one centre frequency.
+
+    The channel grid, the per-channel state machine and the noise floor are all
+    indexed by a grid that means nothing except relative to one centre, so a
+    retune invalidates all three together. Keeping them in one object makes that
+    one line instead of three that can be forgotten separately.
+    """
+
+    def __init__(self, center, rate, frame_seconds, settings):
+        self.center = center
+        self.grid = ChannelGrid(center, rate)
+        self.tracker = EventTracker(
+            self.grid.n, frame_seconds,
+            on_db=settings["on_db"], off_db=settings["off_db"],
+            min_duration=settings["min_duration_s"], hang=settings["hang_s"])
+        self.floor = NoiseFloor(self.grid.n)
+        self._active = None     # one frame stale by construction, see NoiseFloor
+
+    def step(self, power_db, frame_start_sample):
+        """One frame. Returns (started, ended), or None while still warming up."""
+        floor_db = self.floor.update(power_db, active=self._active)
+        if floor_db is None:
             return None
-        iq = ring.get(start, int(nsamples))
+        snr_db = power_db - floor_db
+
+        # One FM transmission at 2.5-5 kHz deviation occupies roughly 11 kHz and
+        # the grid is 6.25 kHz, so a single keyup lights up its own channel and
+        # both neighbours. Logged as-is every transmission becomes three events —
+        # and because FRS primary and interstitial channels interleave to
+        # 12.5 kHz, the two skirts land on legitimate neighbouring channel
+        # numbers. One GMRS keyup was reported as traffic on FRS 5 and FRS 6 as
+        # well: invented activity on channels nobody touched.
+        #
+        # Only a local maximum may open an event. +/-1 channel is deliberate: it
+        # covers the skirts without merging anything 12.5 kHz apart, which is
+        # the closest two real channels get.
+        padded = np.concatenate(([-np.inf], snr_db, [-np.inf]))
+        local_max = (snr_db >= padded[:-2]) & (snr_db >= padded[2:])
+
+        started, ended = self.tracker.update(snr_db, frame_start_sample,
+                                             can_start=local_max)
+        self._active = self.tracker.state == EventTracker.ACTIVE
+        return started, ended
+
+
+class CaptureLoop:
+    """One run of the deck: a radio, a database, and the loop between them.
+
+    Everything that outlives a retune — the device, the database, the retention
+    budget, the counters — is on the instance. Everything defined relative to one
+    centre is on `self.det` and is replaced wholesale by `window()`. The frame
+    body is `_frame()`, which is the part worth reading.
+    """
+
+    STAT_SECONDS = 15.0
+
+    def __init__(self, radio, settings, args, conn, run_id, rate, center):
+        self.radio = radio
+        self.settings = settings
+        self.args = args
+        self.conn = conn
+        self.run_id = run_id
+        self.rate = rate
+
+        self.fs = frame_size(rate)
+        self.frame_seconds = self.fs / rate
+        self.chunk = np.empty(self.fs, np.complex64)
+        self.periodogram = Periodogram(rate)
+        self.overload = OverloadMonitor()
+
+        # The window starts PRETRIGGER_SECONDS before the detector fired, so it
+        # has to be that much longer to still contain ANALYZE_SECONDS of signal.
+        # Sizing it at ANALYZE_SECONDS flat leaves only 0.6 s of carrier once the
+        # trim in analyze_analog has dropped the lead-in — below MIN_TONE_SECONDS,
+        # so no transmission of any length ever got its tone identified.
+        self.pretrigger = int(PRETRIGGER_SECONDS * rate)
+        self.analyze_samples = int(ANALYZE_SECONDS * rate) + self.pretrigger
+        self.min_analyze_samples = int(MIN_ANALYZE_SECONDS * rate)
+        ring_seconds = ANALYZE_SECONDS + PRETRIGGER_SECONDS + RING_SLACK_SECONDS
+        self.ring = Ring(int(ring_seconds * rate))
+        self.ring_seconds = ring_seconds
+
+        self.log = EventLog(conn, run_id, args.receiver_id)
+        self.store = None
+        if args.capture_dir:
+            self.store = CaptureStore(args.capture_dir, run_id,
+                                      max_mb=args.capture_mb,
+                                      keep_iq=args.capture_iq)
+
+        self.det = Detector(center, rate, self.frame_seconds, settings)
+        self.pending = {}
+        self.window_id = None
+        self.window_t0 = time.time()    # replaced per window; defined for finish()
+        self.stalled = 0
+
+        self.overflows = 0
+        self.events_logged = 0
+        self.analyses = 0
+        self.detect_ms = 0.0
+        self.analyze_ms = 0.0
+        self.stat_frames = 0
+        self.session_start = time.time()
+        self.last_stat = time.time()
+
+        # SIGINT stops the loop at the next frame boundary rather than killing it
+        # mid-transaction: systemd sends SIGINT precisely so the in-flight events
+        # and the coverage window get closed. threading.Event is the plainest
+        # thing with the right semantics — set from a handler, read from a loop.
+        self.running = threading.Event()
+        self.running.set()
+        signal.signal(signal.SIGINT, lambda *_: self.running.clear())
+
+    # -- the loop ------------------------------------------------------------
+
+    def go(self, windows):
+        """Visit every window in turn until stopped. Returns an exit status."""
+        stream_failed = False
+        win_idx = 0
+        try:
+            while self.running.is_set():
+                w = windows[win_idx % len(windows)]
+                deadline = (time.time() + self.settings["dwell_s"]
+                            if len(windows) > 1 else None)
+                self.open_window(w, announce_dwell=deadline is not None)
+                while self.running.is_set() and (deadline is None
+                                                 or time.time() < deadline):
+                    if not self.read_and_process():
+                        break
+                self.close_window()
+
+                if self.stalled >= STALL_FRAMES and not self.args.simulate:
+                    print(f"stream delivered nothing for {self.stalled} "
+                          f"consecutive reads. Exiting so the supervisor restarts "
+                          f"the process and the device re-enumerates — a wedged "
+                          f"USB endpoint does not recover in place.",
+                          file=sys.stderr)
+                    stream_failed = True
+                    self.running.clear()
+
+                win_idx += 1
+                if self.args.simulate and win_idx >= len(windows):
+                    self.running.clear()
+        finally:
+            self.finish()
+        # Non-zero tells the supervisor this was not a clean stop, so a Restart=
+        # policy re-enumerates the device instead of treating it as a normal exit.
+        return 1 if stream_failed else 0
+
+    def open_window(self, w, announce_dwell):
+        """Retune, and discard everything that belonged to the old centre.
+
+        Every per-channel index is defined relative to the centre, so the grid,
+        the detector state and the ring all have to go — carrying any of it
+        across a tune would attribute one band's signal to another band's
+        frequency.
+        """
+        center = self.radio.tune(w["center_hz"])
+        self.det = Detector(center, self.rate, self.frame_seconds, self.settings)
+        self.pending.clear()
+        self.ring.reset()
+        self.stalled = 0
+
+        # Anchors the sample clock for this window. ring.reset() has just put the
+        # sample counter back to zero, so every event timestamp in this window is
+        # window_t0 + samples/rate.
+        self.window_t0 = time.time()
+        self.window_id = db.open_window(self.conn, self.run_id,
+                                        self.args.receiver_id, int(center),
+                                        int(self.rate), w["label"])
+        self.log.window_id = self.window_id
+        print(f"\n== {center/1e6:.3f} MHz"
+              + (f" ({w['label']})" if w["label"] else "")
+              + (f", {self.settings['dwell_s']:.0f} s" if announce_dwell else "")
+              + " ==")
+
+    def close_window(self):
+        """Anything still keyed is closed rather than left in flight.
+
+        The transmission may well continue, but this receiver stops being able to
+        see it the moment it retunes, so claiming otherwise would put a duration
+        on the row that nothing observed.
+        """
+        for ch in list(self.log.open_rows):
+            self.log.close(ch, self.window_t0 + self.ring.written / self.rate,
+                           None, self.det.tracker.peak_snr[ch])
+            self.events_logged += 1     # closed by the retune, but still logged
+        if self.window_id is not None:
+            db.close_window(self.conn, self.window_id)
+            self.window_id = None
+
+    def read_and_process(self):
+        """One read. False means stop this window."""
+        ret = self.radio.read(self.chunk, self.fs)
+        if ret <= 0:
+            if ret == self.radio.OVERFLOW:
+                self.overflows += 1
+                print("OVERFLOW — samples dropped", file=sys.stderr)
+                self.stalled = 0
+                return True
+            # Not an overflow: the device gave us nothing at all. One is a
+            # timeout, a run of them is a radio that has stopped talking.
+            self.stalled += 1
+            return self.stalled < STALL_FRAMES
+        self.stalled = 0
+        self._frame(self.chunk[:ret])
+        return True
+
+    def _frame(self, samples):
+        """Detect, analyse and log one frame's worth of samples."""
+        frame_start = self.ring.written
+        self.ring.push(samples)
+        self.stat_frames += 1
+
+        t0 = time.perf_counter()
+        psd = self.periodogram(samples)
+        if psd is None:
+            return
+        power_db = to_db(self.det.grid.power(psd))
+        self.detect_ms += (time.perf_counter() - t0) * 1000.0
+
+        clipping, desense, clip_frac = self.overload.update(samples, power_db)
+        if clipping or desense:
+            total = self.overload.clip_frames + self.overload.desense_frames
+            if total == 1 or total % 500 == 0:
+                why = "clipping" if clipping else "desense"
+                print(f"  ** OVERLOAD ({why}) — add attenuation "
+                      f"[clip {clip_frac*100:.2f}%]", file=sys.stderr)
+
+        stepped = self.det.step(power_db, frame_start)
+        if stepped is None:
+            return
+        started, ended = stepped
+
+        # Both edges are reported where they happened, not where they were
+        # noticed; see EventTracker. Every timestamp comes off the sample clock,
+        # anchored once when the window opened. Reading time.time() per frame and
+        # subtracting a sample-derived offset mixes two clocks that only agree
+        # while samples arrive in real time — and they do not after a USB
+        # overflow delivers a burst, while the process is descheduled, or under
+        # --simulate, where a whole transmission can be generated in a fraction
+        # of the time it represents. Mixed, an event could be stamped as ending
+        # 0.18 s before it started, which the schema rejects outright:
+        #   CHECK (t_end IS NULL OR t_end >= t_start).
+        tracker = self.det.tracker
+        t_started = self.window_t0 + tracker.last_start_sample / self.rate
+        t_ended = self.window_t0 + tracker.last_end_sample / self.rate
+
+        for ch in started:
+            ch = int(ch)
+            self.pending[ch] = max(0, tracker.start_sample[ch] - self.pretrigger)
+            self.log.start(ch, t_started, self.det.grid.freqs_hz[ch],
+                           overload=clipping or desense)
+
+        for ch, start in list(self.pending.items()):
+            if self.ring.written >= start + self.analyze_samples:
+                self._analyse(ch, self.analyze_samples)
+
+        for ch in ended:
+            ch = int(ch)
+            # Still pending means the transmission ended before ANALYZE_SECONDS
+            # accumulated — most festival traffic, every "copy that". The IQ is
+            # sitting in the ring buffer already, so analyse what there is
+            # instead of discarding it. Deviation needs almost no dwell, so even
+            # a very short keyup still reaches tier 1; the tone stages gate
+            # themselves on their own dwell inside analyze_analog.
+            if ch in self.pending:
+                avail = tracker.last_end_sample - self.pending[ch]
+                self._analyse(ch, min(avail, self.analyze_samples))
+            self.pending.pop(ch, None)
+
+            duration = max(0.0, (tracker.last_end_sample
+                                 - tracker.start_sample[ch]) / self.rate)
+            if self.log.close(ch, t_ended, duration,
+                              tracker.peak_snr[ch]) is not None:
+                self.events_logged += 1
+                print(f"  {self.det.grid.freqs_hz[ch]/1e6:10.4f} MHz  ended, "
+                      f"{duration:.2f} s")
+
+        self._stats()
+
+    # -- analysis ------------------------------------------------------------
+
+    def _analyse(self, ch, nsamples):
+        """Analyse one channel, record the result, and say so on the console.
+
+        Removes ch from `pending` either way — one analysis per event.
+        """
+        t0 = time.perf_counter()
+        result = self._measure(ch, nsamples)
+        self.analyze_ms += (time.perf_counter() - t0) * 1000.0
+        if result is None:
+            return
+        self.analyses += 1
+        freq_hz = self.det.grid.freqs_hz[ch]
+        row = self.log.analysed(ch, result, freq_hz)
+        if self.store is not None and row is not None:
+            self.log.attach_capture(row, *self.store.write(row,
+                                                           result["signals"]))
+        self._report(ch, result)
+
+    def _measure(self, ch, nsamples):
+        start = self.pending.pop(ch, None)
+        if (start is None or ch not in self.log.open_rows
+                or nsamples < self.min_analyze_samples):
+            return None
+        iq = self.ring.get(start, int(nsamples))
         if iq is None:
             return None
-        return analyze_analog(iq, rate, grid.freqs_hz[ch] - center,
-                              keep_signals=store is not None)
+        return analyze_analog(iq, self.rate,
+                              self.det.grid.freqs_hz[ch] - self.det.center,
+                              keep_signals=self.store is not None)
 
-    def report(ch, result):
+    def _report(self, ch, result):
         if result["dcs_code"] is not None:
             tone = (f"DCS {result['dcs_code']:03d}{result['dcs_polarity']}"
                     f" ({result['dcs_errors']} bit err)")
@@ -1622,268 +1664,117 @@ def run(args):
             tone = "no tone"
         else:
             tone = "tone not checked"
-        print(f"  {grid.freqs_hz[ch]/1e6:10.4f} MHz  "
-              f"snr {tracker.peak_snr[ch]:5.1f} dB  "
+        print(f"  {self.det.grid.freqs_hz[ch]/1e6:10.4f} MHz  "
+              f"snr {self.det.tracker.peak_snr[ch]:5.1f} dB  "
               f"dev {result['deviation_hz']:6.0f} Hz  "
               f"[{result['analyzed_s']:.2f}s]  {tone}")
 
-    overflows = 0
-    frames = 0
-    events_logged = 0
-    detect_ms_total = 0.0
-    analyze_ms_total = 0.0
-    analyses = 0
-    last_stat = time.time()
-    stat_frames = 0
+    def _stats(self):
+        if not self.args.stats:
+            return
+        elapsed = time.time() - self.last_stat
+        if elapsed < self.STAT_SECONDS:
+            return
+        fps = self.stat_frames / elapsed
+        d_ms = self.detect_ms / max(1, self.stat_frames)
+        a_ms = self.analyze_ms / max(1, self.analyses)
+        uptime_h = (time.time() - self.session_start) / 3600.0
+        active = int((self.det.tracker.state == EventTracker.ACTIVE).sum())
+        print(f"[stats] {fps:5.1f} fps (target {self.rate/self.fs:.0f})   "
+              f"overflow {self.overflows}   active {active}   "
+              f"events {self.events_logged} "
+              f"({self.events_logged/max(uptime_h, 1/60):.0f}/hr)")
+        print(f"        detect {d_ms:5.2f} ms/frame ({d_ms*fps/10:4.1f}% core)   "
+              f"floor {self.det.floor.last_cost_ms:5.2f} ms/{FLOOR_EVERY} frames"
+              f"   analyse {a_ms:6.1f} ms x{self.analyses}")
+        print(f"        clip {self.overload.clip_frames}   "
+              f"desense {self.overload.desense_frames}")
+        self.detect_ms = self.analyze_ms = 0.0
+        self.analyses = 0
+        self.stat_frames = 0
+        self.last_stat = time.time()
 
-    # SIGINT stops the loop at the next frame boundary rather than killing it
-    # mid-transaction: systemd sends SIGINT precisely so the in-flight events and
-    # the coverage window get closed. threading.Event is the plainest thing with
-    # the right semantics — set from a signal handler, read from the loop.
-    running = threading.Event()
-    running.set()
-    signal.signal(signal.SIGINT, lambda *_: running.clear())
+    # -- teardown ------------------------------------------------------------
 
-    win_idx = 0
-    window_id = None
-    window_t0 = time.time()     # replaced per window; defined for the finally
-    stalled = 0
-    stream_failed = False
+    def finish(self):
+        """Close everything that is open, then say how it went.
 
-    try:
-        while running.is_set():
-            w = windows[win_idx % len(windows)]
+        Coverage lives in coverage_windows (migration 7), one row per tune, so
+        "what were we listening to at 21:30" is answerable for a rotating
+        receiver. run_receivers still carries the radio, its serial and the rate;
+        runs carries the span.
+        """
+        self.close_window()
+        db.end_run(self.conn, self.run_id)
+        self.conn.close()
+        self.radio.stop()
 
-            # Retune. Every per-channel index is defined relative to the centre,
-            # so the grid, the detector state and the ring all have to go —
-            # carrying any of it across a tune would attribute one band's signal
-            # to another band's frequency.
-            sdr.setFrequency(SOAPY_SDR_RX, 0, w["center_hz"])
-            center = sdr.getFrequency(SOAPY_SDR_RX, 0)
-            grid = ChannelGrid(center, rate)
-            tracker = EventTracker(grid.n, frame_seconds, on_db=on_db,
-                                   off_db=off_db, min_duration=min_duration_s,
-                                   hang=hang_s)
-            floor_est = NoiseFloor(grid.n)
-            pending.clear()
-            ring.reset()
-            stalled = 0
-            active_mask = None
-
-            # Anchors the sample clock for this window. ring.reset() has just
-            # put the sample counter back to zero, so every event timestamp in
-            # this window is window_t0 + samples/rate.
-            window_t0 = time.time()
-            window_id = db.open_window(conn, run_id, args.receiver_id,
-                                       int(center), int(rate), w["label"])
-            log.window_id = window_id
-            deadline = time.time() + dwell_s if len(windows) > 1 else None
-            print(f"\n== {center/1e6:.3f} MHz"
-                  + (f" ({w['label']})" if w["label"] else "")
-                  + (f", {dwell_s:.0f} s" if deadline else "") + " ==")
-
-            while running.is_set() and (deadline is None or time.time() < deadline):
-                status = sdr.readStream(stream, [chunk], fs, timeoutUs=2_000_000)
-                if status.ret <= 0:
-                    if status.ret == soapy.SOAPY_SDR_OVERFLOW:
-                        overflows += 1
-                        print("OVERFLOW — samples dropped", file=sys.stderr)
-                        stalled = 0
-                        continue
-                    # Not an overflow: the device gave us nothing at all. One is a
-                    # timeout, a run of them is a radio that has stopped talking.
-                    stalled += 1
-                    if stalled >= STALL_FRAMES:
-                        break
-                    continue
-                stalled = 0
-
-                samples = chunk[:status.ret]
-                frame_start = ring.written
-                ring.push(samples)
-                frames += 1
-                stat_frames += 1
-
-                # ---- detection -------------------------------------------------
-                t0 = time.perf_counter()
-                psd = periodogram(samples)
-                if psd is None:
-                    continue
-                power_db = to_db(grid.power(psd))
-                detect_ms_total += (time.perf_counter() - t0) * 1000.0
-
-                clipping, desense, clip_frac = overload.update(samples, power_db)
-                if clipping or desense:
-                    total = overload.clip_frames + overload.desense_frames
-                    if total == 1 or total % 500 == 0:
-                        why = "clipping" if clipping else "desense"
-                        print(f"  ** OVERLOAD ({why}) — add attenuation "
-                              f"[clip {clip_frac*100:.2f}%]", file=sys.stderr)
-
-                # `active_mask` is from the previous frame — see NoiseFloor.update.
-                floor_db = floor_est.update(power_db, active=active_mask)
-                if floor_db is None:
-                    continue
-                snr_db = power_db - floor_db
-
-                # One FM transmission at 2.5-5 kHz deviation occupies roughly
-                # 11 kHz, and the detector grid is 6.25 kHz, so a single keyup
-                # lights up its own channel and both neighbours. Logged as-is,
-                # every transmission becomes three events — and because FRS
-                # primary and interstitial channels interleave to 12.5 kHz, the
-                # two skirts land on legitimate neighbouring channel numbers.
-                # One GMRS keyup was being reported as traffic on FRS 5 and
-                # FRS 6 as well: invented activity on channels nobody touched.
-                #
-                # Only a local maximum may open an event. +/-1 channel is
-                # deliberate — it covers the skirts without merging anything
-                # 12.5 kHz apart, which is the closest two real channels get.
-                padded = np.concatenate(([-np.inf], snr_db, [-np.inf]))
-                local_max = (snr_db >= padded[:-2]) & (snr_db >= padded[2:])
-                started, ended = tracker.update(snr_db, frame_start,
-                                                can_start=local_max)
-                active_mask = tracker.state == EventTracker.ACTIVE
-
-                # Both edges are reported where they happened, not where they
-                # were noticed; see EventTracker.
-                #
-                # Every timestamp comes off the sample clock, anchored once when
-                # the window opened. Reading time.time() per frame and
-                # subtracting a sample-derived offset mixes two clocks that only
-                # agree while samples arrive in real time — and they do not
-                # after a USB overflow delivers a burst, while the process is
-                # descheduled, or under --simulate, where a whole transmission
-                # can be generated in a fraction of the time it represents.
-                # Mixed, an event could be stamped as ending 0.18 s before it
-                # started, which the schema rejects outright:
-                #   CHECK (t_end IS NULL OR t_end >= t_start).
-                t_started = window_t0 + tracker.last_start_sample / rate
-                t_ended = window_t0 + tracker.last_end_sample / rate
-
-                for ch in started:
-                    ch = int(ch)
-                    pending[ch] = max(0, tracker.start_sample[ch] - pretrigger)
-                    log.start(ch, t_started, grid.freqs_hz[ch],
-                              overload=clipping or desense)
-
-                # ---- analyse channels that have reached full dwell ---------------
-                for ch, start in list(pending.items()):
-                    if ring.written < start + analyze_samples:
-                        continue
-                    t1 = time.perf_counter()
-                    result = analyse(ch, analyze_samples)
-                    analyze_ms_total += (time.perf_counter() - t1) * 1000.0
-                    if result is None:
-                        continue
-                    analyses += 1
-                    row = log.analysed(ch, result, grid.freqs_hz[ch])
-                    if store is not None and row is not None:
-                        log.attach_capture(row, *store.write(row, result["signals"]))
-                    report(ch, result)
-
-                for ch in ended:
-                    ch = int(ch)
-                    # Still pending means the transmission ended before ANALYZE_SECONDS
-                    # accumulated — most festival traffic, every "copy that". The IQ is
-                    # sitting in the ring buffer already, so analyse what there is
-                    # instead of discarding it. Deviation needs almost no dwell, so
-                    # even a very short keyup still reaches tier 1; the tone stages
-                    # gate themselves on their own dwell inside analyze_analog.
-                    if ch in pending:
-                        avail = tracker.last_end_sample - pending[ch]
-                        t1 = time.perf_counter()
-                        result = analyse(ch, min(avail, analyze_samples))
-                        analyze_ms_total += (time.perf_counter() - t1) * 1000.0
-                        if result is not None:
-                            analyses += 1
-                            row = log.analysed(ch, result, grid.freqs_hz[ch])
-                            if store is not None and row is not None:
-                                log.attach_capture(
-                                    row, *store.write(row, result["signals"]))
-                            report(ch, result)
-                    pending.pop(ch, None)
-                    duration = max(0.0, (tracker.last_end_sample
-                                         - tracker.start_sample[ch]) / rate)
-                    if log.close(ch, t_ended, duration,
-                                 tracker.peak_snr[ch]) is None:
-                        continue
-                    events_logged += 1
-                    print(f"  {grid.freqs_hz[ch]/1e6:10.4f} MHz  ended, {duration:.2f} s")
-
-                # ---- periodic stats ---------------------------------------------
-                if args.stats and time.time() - last_stat >= 15.0:
-                    el = time.time() - last_stat
-                    fps = stat_frames / el
-                    d_ms = detect_ms_total / max(1, stat_frames)
-                    a_ms = analyze_ms_total / max(1, analyses)
-                    uptime_h = (time.time() - session_start) / 3600.0
-                    print(f"[stats] {fps:5.1f} fps (target {rate/fs:.0f})   "
-                          f"overflow {overflows}   active {int((tracker.state==1).sum())}   "
-                          f"events {events_logged} ({events_logged/max(uptime_h,1/60):.0f}/hr)")
-                    print(f"        detect {d_ms:5.2f} ms/frame ({d_ms*fps/10:4.1f}% core)   "
-                          f"floor {floor_est.last_cost_ms:5.2f} ms/{FLOOR_EVERY} frames   "
-                          f"analyse {a_ms:6.1f} ms x{analyses}")
-                    print(f"        clip {overload.clip_frames}   "
-                          f"desense {overload.desense_frames}")
-                    detect_ms_total = analyze_ms_total = 0.0
-                    analyses = 0
-                    stat_frames = 0
-                    last_stat = time.time()
-
-
-            # ---- window over --------------------------------------------------
-            # Anything still keyed is closed here rather than left in flight. The
-            # transmission may well continue, but this receiver stops being able
-            # to see it the moment it retunes, so claiming otherwise would put a
-            # duration on the row that nothing observed.
-            for ch in list(log.open_rows):
-                log.close(ch, window_t0 + ring.written / rate, None,
-                          tracker.peak_snr[ch])
-                events_logged += 1      # closed by the retune, but still logged
-            db.close_window(conn, window_id)
-
-            if stalled >= STALL_FRAMES and not args.simulate:
-                print(f"stream delivered nothing for {stalled} consecutive reads. "
-                      f"Exiting so the supervisor restarts the process and the "
-                      f"device re-enumerates — a wedged USB endpoint does not "
-                      f"recover in place.", file=sys.stderr)
-                stream_failed = True
-                running.clear()
-
-            win_idx += 1
-            if args.simulate and win_idx >= len(windows):
-                running.clear()
-    finally:
-        # Coverage lives in coverage_windows (migration 7), one row per tune, so
-        # "what were we listening to at 21:30" is answerable for a rotating
-        # receiver. run_receivers still carries the radio, its serial and the
-        # rate; runs carries the span.
-        if window_id is not None:
-            db.close_window(conn, window_id)
-        for ch in list(log.open_rows):
-            log.close(ch, window_t0 + ring.written / rate, None,
-                      tracker.peak_snr[ch])
-        db.end_run(conn, run_id)
-        conn.close()
-        sdr.deactivateStream(stream)
-        sdr.closeStream(stream)
-        print(f"\nstopped. overflows: {overflows}  events: {events_logged}  "
-              f"clip frames: {overload.clip_frames}  "
-              f"desense frames: {overload.desense_frames}")
-        if store is not None:
-            print(f"retained {store.count} captures, {store.written/1e6:.1f} MB"
-                  + (f" — stopped early: {store.stopped}" if store.stopped else ""))
-        if overflows:
-            print("Overflows mean dropped samples and unreliable data — check USB "
-                  "topology with 'lsusb -t' and power with 'dmesg | grep -i voltage'.")
-        if overload.clip_frames or overload.desense_frames:
+        print(f"\nstopped. overflows: {self.overflows}  "
+              f"events: {self.events_logged}  "
+              f"clip frames: {self.overload.clip_frames}  "
+              f"desense frames: {self.overload.desense_frames}")
+        if self.store is not None:
+            print(f"retained {self.store.count} captures, "
+                  f"{self.store.written/1e6:.1f} MB"
+                  + (f" — stopped early: {self.store.stopped}"
+                     if self.store.stopped else ""))
+        if self.overflows:
+            print("Overflows mean dropped samples and unreliable data — check "
+                  "USB topology with 'lsusb -t' and power with "
+                  "'dmesg | grep -i voltage'.")
+        if self.overload.clip_frames or self.overload.desense_frames:
             print("Front end was overloaded. Affected events are flagged in the "
                   "`overload` column. Add attenuation — 20 dB is the default and "
                   "costs no usable sensitivity at festival distances.")
 
-    # Non-zero tells the supervisor this was not a clean stop, so a Restart=
-    # policy re-enumerates the device instead of treating it as a normal exit.
-    return 1 if stream_failed else 0
+
+def run(args):
+    settings = resolve_settings(args)
+    radio = Radio(args, settings)
+    rate, center = radio.configure(settings)
+    serial = radio.serial(settings["serial_want"])
+
+    windows = settings["windows"]
+    fs = frame_size(rate)
+    grid_n = ChannelGrid(center, rate).n
+    print(f"receiver {args.receiver_id}: {rate/1e6:.3f} MSPS, "
+          f"gain {settings['gain']}, ppm {settings['ppm']}")
+    print(f"{settings['mode']}: " + ", ".join(
+        f"{w['center_hz']/1e6:.3f} MHz" + (f" ({w['label']})" if w['label'] else "")
+        for w in windows)
+        + (f", {settings['dwell_s']:.0f} s each" if len(windows) > 1 else ""))
+    print(f"{grid_n} channels on a {CHANNEL_HZ/1000:.2f} kHz grid, "
+          f"{fs/rate*1000:.1f} ms frames ({rate/fs:.0f}/sec)")
+    print(f"detect on {settings['on_db']:.1f} dB / off {settings['off_db']:.1f} dB, "
+          f"min {settings['min_duration_s']:.2f} s, "
+          f"hang {settings['hang_s']:.2f} s")
+
+    db.init_schema(args.db)
+    # db.connect opens with isolation_level=None, so every statement commits as
+    # it executes. There is nothing to batch and nothing to flush: the calls to
+    # conn.commit() that used to sit at the ends of these blocks were no-ops that
+    # read as transaction boundaries. The two-phase write cannot be atomic anyway
+    # — a row is inserted on keyup and updated a second later — and a half-written
+    # event is exactly what an unattended deck should leave behind when it loses
+    # power mid-transmission.
+    conn = db.connect(args.db)
+    run_id = db.start_run(conn, args.profile, notes=args.notes)
+    db.register_receiver(conn, run_id, args.receiver_id,
+                         serial=serial, sample_rate_hz=int(rate),
+                         gain_db=settings["gain"], ppm_error=settings["ppm"],
+                         center_hz=int(center),
+                         attenuator_db=settings["attenuator_db"],
+                         antenna=settings["antenna"])
+
+    loop = CaptureLoop(radio, settings, args, conn, run_id, rate, center)
+    print(f"ring buffer {loop.ring_seconds*rate*8/1e6:.0f} MB\n")
+    if loop.store is not None:
+        print(f"retaining {'audio + channel IQ' if args.capture_iq else 'audio'} "
+              f"under {loop.store.root}, budget {args.capture_mb:.0f} MB")
+    print(f"run {run_id}, serial {serial}, profile {args.profile}")
+
+    radio.start()
+    return loop.go(windows)
 
 
 def main():

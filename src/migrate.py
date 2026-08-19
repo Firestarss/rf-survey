@@ -1,16 +1,17 @@
 """Incremental schema migrations.
 
-`schema.sql` describes the current shape for a *fresh* database. This applies the
-steps needed to bring an *existing* one up to that shape, so a schema change is a
-few lines here rather than a full rewrite of schema.sql and a rebuild.
+`schema_v2.sql` is the baseline every database starts from. This carries one
+the rest of the way, so a schema change is a few lines here rather than a rewrite
+of the baseline and a rebuild — and so a deployed database and a fresh one end up
+byte-identical, which test_migrate checks.
 
 Adding a migration:
   1. Append to MIGRATIONS with the next version number.
   2. Bump SCHEMA_VERSION in db.py.
 
-Do NOT mirror the change into schema.sql. That file describes a *v2* database and
-stamps v2; init_schema() runs it and then replays every migration on top. Adding a
-column there as well makes the matching `ALTER TABLE ... ADD COLUMN` fail with
+Do NOT mirror the change into schema_v2.sql. That file is frozen at v2;
+init_schema() runs it and then replays every migration on top, so a column added
+in both places makes the migration's `ALTER TABLE ... ADD COLUMN` fail with
 "duplicate column name" on every fresh build. Migrations own the schema past v2.
 
 Every statement must be safe to run against a database that already has real rows.
