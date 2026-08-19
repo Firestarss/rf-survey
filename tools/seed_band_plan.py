@@ -72,9 +72,9 @@ def channels() -> list[Row]:
         note = "50 W, repeater output"
         if f in legacy:
             note += f"; legacy {legacy[f]} — preprogrammed on cheap radios"
-        ch(f, 25_000, "gmrs", f"GMRS {n}", str(n), rpt=1, offset=GMRS_OFFSET,
+        ch(f, 20_000, "gmrs", f"GMRS {n}", str(n), rpt=1, offset=GMRS_OFFSET,
            source="FCC 95E", notes=note)
-        ch(f + GMRS_OFFSET, 25_000, "gmrs", f"GMRS {n} repeater input", f"{n}R",
+        ch(f + GMRS_OFFSET, 20_000, "gmrs", f"GMRS {n} repeater input", f"{n}R",
            source="FCC 95E", notes="50 W, repeater input only")
 
     # --- MURS, 5 channels, licence by rule --------------------------------
@@ -295,4 +295,11 @@ def main(path: str) -> None:
 
 
 if __name__ == "__main__":
+    # Python turns SIGPIPE into an exception, so piping this into `head` raises
+    # BrokenPipeError after the reader exits. Restore the default and die quietly.
+    import signal
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError):
+        pass  # not POSIX, or not on the main thread
     main(sys.argv[1] if len(sys.argv) > 1 else "data/survey.sqlite")
