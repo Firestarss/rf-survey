@@ -21,6 +21,7 @@ src/schema_v2.sql         the frozen v2 baseline. Not the current shape.
 src/migrate.py            v3-v8, and where every future change goes.
 src/bandplan.py           frequency -> label lookup
 src/enrich.py             tag, rollup, pair, score
+src/cli.py                the two lines every command-line entry point shares
 tools/seed_band_plan.py   FRS/GMRS/MURS/Part 90 channels + ARRL ham segments
 tools/make_fixtures.py    deterministic synthetic festival scenario
 tools/deck-check.sh       soak and diagnostics
@@ -498,7 +499,9 @@ characterised in section 3 — but nothing has measured a real transmitter throu
 receiver. Note how little that guarantee was worth by itself: the estimator was
 accurate to 4% in isolation while reporting pure noise for every event the deck
 actually logged, because the window it was handed in the field was not the window it
-had been tested on (section 4). Phase 3 should transmit a known narrowband signal and a known wideband one, at
+had been tested on (section 4). It then measured excursion from the *channel grid*
+rather than from the carrier, which added the transmitter's offset from its grid slot
+to every answer (section 6). Phase 3 should transmit a known narrowband signal and a known wideband one, at
 several distances, and compare against what the deck reports. If it is sloppy, raise
 `DEV_EVIDENCE_MARGIN_HZ` or `DEV_MIN_SNR_DB` until false positives stop. Occupied
 bandwidth is still measured by nothing; `events.bandwidth_hz` is NULL on every row the
@@ -506,7 +509,90 @@ deck produces.
 
 ---
 
-## 6. The design documents — restored
+## 6. Third pass: a code review of the whole repository
+
+Nothing here was found by running the deck. It came from reading every file and
+then checking the readings against measurements, which is why most of it is
+small and two items are not.
+
+### The two that matter
+
+**Deviation was measured from the channel grid, not from the carrier.**
+`p99(|inst|)` left the DC term in, and that term is however far the transmitter
+sits from the 6.25 kHz slot it was filed under:
+
+```
+carrier off grid    0 Hz     1250 Hz    2500 Hz    3125 Hz
+reported (2.4 kHz)  2326      3539       4788       5414
+```
+
+Eleven of the 85 seeded channels are off-grid by 1250–2500 Hz — **every MURS
+channel**, several Part 90 VHF dots, and 146.520 — so a narrowband signal on one
+of them read wide, and wide is the verdict that rules FRS out. The FRS and GMRS
+channels themselves are all on-grid, so the discriminator was not mislabelling
+in practice; the number in `channels.deviation_hz` and `v_contactable.dev_hz`
+was wrong on the VHF channels, and it reads as evidence. `freq_error` is
+subtracted before the percentile now. 146.520 went 3613 → 2448 Hz in the capture
+path. Any deviation figure recorded before 2026-08-19 on those channels is high
+by its grid offset.
+
+**A burst of interference in the pretrigger defeated the analysis trim.** The
+trim took its edges from the first and last sample over threshold, so anything
+early in the lead-in anchored it at the start of the window and the whole
+carrier-free run came back in — deviation ~11500 Hz, the noise figure, which is
+section 4's bug arriving through a different door. 0.05 ms of interference is
+enough; a single sample is not, because the decimation filter absorbs it. The
+envelope is smoothed before thresholding and the edges come from a percentile of
+the crossings. Regression test in `tests/test_analyze.py`.
+
+### Things that silently did nothing
+
+- `deck-check.sh` looked for `survey_prototype.py` in four places, none of them
+  `src/`, so the Phase 0 selftest never ran and printed "not found" instead.
+- `detection.min_duration_s` and `detection.hang_s` were in the profile and read
+  by nobody. `EventTracker` used its own defaults, which happened to be the same
+  numbers — so editing the profile changed nothing and said nothing. Same for
+  `receivers.*.attenuator_db` and `.antenna`, which have had columns since v2
+  and were NULL on every real run.
+- `conn.commit()` in the capture loop was a no-op. `db.connect` opens with
+  `isolation_level=None`, so every statement commits as it executes; the calls
+  read as transaction boundaries and were not.
+- `migrate.apply()` stamped the target version when no migration reached it,
+  which would mark a database as upgraded by a step that does not exist.
+- `festival_scenario` had traffic for one of the three VHF windows, so the
+  rotation command in section 1 logged one event and two windows of silence
+  indistinguishable from a broken detector. Every window has traffic now and
+  `--simulate` announces what each one can hear.
+- The tier 0 fixture capped keyups at 1.0 s, written when the analysis dwell was
+  1.4 s. The dwell is 0.9 s now, so 464.500 had moved to tier 1 while every
+  document still called it the tier 0 case. It tracks `ANALYZE_SECONDS`.
+
+### Shape
+
+`run()` was 432 lines and four levels deep, so the only way to exercise any of
+it was to run the whole loop. It is now `resolve_settings`, `Radio`, `Detector`
+and `CaptureLoop`, split along the seam the retune already implied — console
+output and database rows are identical on both simulate runs.
+
+`selftest()` was 312 lines and correctness had migrated into `tests/`
+underneath it. It keeps sizing and speed, which is a property of the machine
+and the one thing no unit test can answer; **`bash tools/run-tests.sh` is
+correctness now**, and `deck-check.sh` runs both. Three checks that existed only
+in the selftest moved into the suite first.
+
+`schema.sql` is `schema_v2.sql`. It describes a database that has not existed
+since v2 and calling it the schema invited reading it as one.
+
+The end-to-end test drove the capture loop from `setUp`, so 24 methods meant 24
+identical runs — 87 s of the suite's 147 s. One run per class now; the suite is
+68 s.
+
+Deleted: `tools/apply-v2.sh` and `apply-v4.sh`, 326 lines describing how to
+upgrade to schema versions four and five behind current.
+
+---
+
+## 7. The design documents — restored
 
 `rm -rf *` in the home directory on 2026-08-19 destroyed five design documents. **They were
 restored and are in the repository**, tracked as of b304e79:
@@ -527,13 +613,15 @@ same commit. Corrected 2026-08-19 after checking the machine rather than the not
 window as 154.950 with the reasoning, not the old 153.200. That warning is also cleared.
 
 **`bench-bringup.md` carries its own copy of the phase table**, and it does not know about
-anything in sections 3 or 4 above. Its Phase 0 line still reads "28.8% of one core", which
-was measured before short transmissions were analysed at all, before DCS decoding, and
-before captures were written to disk. Re-measure before trusting it — see section 5.
+anything in sections 3, 4 or 6 above. Its Phase 0 line still reads "28.8% of one core",
+which was measured before short transmissions were analysed at all, before DCS decoding,
+and before captures were written to disk. Re-measure before trusting it — see section 5.
+Its Phase 0 procedure now names both `--selftest` and `tools/run-tests.sh`, because as
+of section 6 the selftest no longer checks correctness.
 
 ---
 
-## 7. Housekeeping still outstanding
+## 8. Housekeeping still outstanding
 
 - DHCP reservation for `radio-deck` — it moved .243 to .244 mid-session once already
 - WiFi power save disabled via systemd oneshot (no NetworkManager on Ubuntu Server)
