@@ -7,9 +7,10 @@ which is the difference between a 2.00 s transmission logging as 2.00 s and as
 
 import unittest
 
+import support  # noqa: F401  — puts src/ on sys.path
+
 import numpy as np
 
-from support import SRC  # noqa: F401
 
 from survey_prototype import EventTracker
 

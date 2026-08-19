@@ -17,16 +17,23 @@ src/survey_prototype.py   detector. Writes through db.py; owns no schema of its 
 src/dcs.py                Golay(23,12) and DCS codewords. Read its docstring first.
 src/simradio.py           synthetic Airspy, so the capture loop runs with no radio
 src/db.py                 connection, schema init, run lifecycle, log_event
-src/schema.sql            fresh-database shape. Stamps v2; migrations carry it forward.
-src/migrate.py            incremental migrations. Never re-paste schema.sql again.
+src/schema_v2.sql         the frozen v2 baseline. Not the current shape.
+src/migrate.py            v3-v8, and where every future change goes.
 src/bandplan.py           frequency -> label lookup
 src/enrich.py             tag, rollup, pair, score
+src/cli.py                the two lines every command-line entry point shares
 tools/seed_band_plan.py   FRS/GMRS/MURS/Part 90 channels + ARRL ham segments
 tools/make_fixtures.py    deterministic synthetic festival scenario
 tools/deck-check.sh       soak and diagnostics
 profiles/festival.yaml    receiver assignments, detection thresholds, operator licences
 systemd/                  unit file and deployment notes for unattended running
 docs/phase_log.md         gate tracker. Phase 0 PASS.
+docs/bench-bringup.md     the nine-phase gated procedure. Read this on delivery day.
+docs/phase1-detail.md     Phase 1 step by step, headless
+docs/design-decisions.md  what was chosen, what was rejected, why
+docs/pi-architecture.md   where things live on radio-deck
+docs/rf-primer.md         the radio concepts
+docs/band-plan-notes.md   window choices and their reasoning
 ```
 
 Run the whole chain with no hardware:
@@ -36,7 +43,8 @@ python3 src/db.py data/survey.sqlite
 python3 tools/seed_band_plan.py data/survey.sqlite
 python3 tools/make_fixtures.py data/survey.sqlite --wipe
 python3 src/enrich.py data/survey.sqlite --profile profiles/festival.yaml
-python3 src/survey_prototype.py --selftest
+python3 src/survey_prototype.py --selftest      # sizing and speed only
+bash tools/run-tests.sh                        # correctness
 ```
 
 And the capture loop itself, still with no hardware — this drives the detector, the
@@ -46,7 +54,7 @@ analyser, the two-phase write and the retune logic end to end:
 python3 src/survey_prototype.py --simulate 14 --receiver-id uhf
 python3 src/survey_prototype.py --simulate 8 --rate 2.4e6 --receiver-id vhf \
         --dwell-seconds 6                       # rotation across three windows
-python3 src/dcs.py --check                      # is the DCS codeword table real yet
+python3 src/dcs.py                              # DCS codeword table self-check
 ```
 
 ---
@@ -124,7 +132,7 @@ before returning. The rebuild also added `deviation_hz`, `ctcss_dev_hz`, `overlo
 `tone_state` CHECK that migration 3 could not add via ALTER, `channels.deviation_hz` and
 `run_receivers.center_hz`.
 
-`schema.sql` stays v2-shaped. It stamps v2 and `init_schema()` replays every migration on
+`schema_v2.sql` stays v2-shaped. It stamps v2 and `init_schema()` replays every migration on
 top, so adding a column there too makes the matching ALTER fail with "duplicate column
 name" on every fresh build. The two comments claiming otherwise are corrected. Fresh and
 upgraded databases were diffed schema-for-schema and are identical.
@@ -132,7 +140,7 @@ upgraded databases were diffed schema-for-schema and are identical.
 **The prototype conforms.** `open_db()` and the private `coverage` table are gone.
 `coverage` said nothing `runs` and `run_receivers` do not, once `center_hz` existed, and
 nothing joined to it. The two-phase write lives in an `EventLog` class holding every
-field mapping in one place, which is what lets `--selftest` drive the real code path
+field mapping in one place, which is what lets the tests drive the real code path
 against a temporary database with no radio attached. `--receiver-id` is now
 `choices=("uhf","vhf")` with no default, `--db` defaults to `data/survey.sqlite`, and
 `--profile` is snapshotted verbatim into the run. The serial is read back off the device
@@ -215,7 +223,7 @@ Five changes were not in the original section 3 and are called out rather than b
   `min_duration` (0.12 s) after the signal actually started and the event closed `hang`
   (0.30 s) after it stopped, inflating every duration by ~0.42 s and every airtime total
   with it. `EventTracker` now keeps recent frame boundaries and reports both edges where
-  they happened. Verified in `--selftest`: a 0.80 s signal logs as 0.80 s.
+  they happened. Verified in `tests/test_tracker.py`: a 0.80 s signal logs as 0.80 s.
 
 - **`FREQ_BIN_HZ` is 6250, but the bin is no longer what gets reported.** Binning at
   6250 groups measurements correctly, but its grid has arbitrary phase against real
@@ -242,9 +250,11 @@ Five changes were not in the original section 3 and are called out rather than b
 
 - **`content` is never determined.** Nothing classifies voice versus data. This is why
   it left the ladder.
-- **DCS is suspected, never decoded.** Decoding the 23-bit Golay word at 134.4 bps is
-  well-defined work and would move channels from tier 2 to tier 3.
-- **Transmissions shorter than `ANALYZE_SECONDS` (1.4 s) are never analysed.** Most
+- **DCS is now decoded** (2026-08-19, section 5). A channel with a codeword reaches
+  tier 3. `dcs_suspected` survives only for the case where something subaudible is
+  present, is demonstrably not CTCSS, and no codeword comes out — that still caps
+  at tier 2.
+- **Transmissions shorter than the analysis dwell are never fully analysed.** Most
   festival traffic is shorter than that, and those events now correctly sit at tier 0
   rather than being scored on fields nothing filled in. Analysing whatever dwell exists
   and reporting lower confidence is the obvious improvement.
@@ -397,8 +407,11 @@ logging events entirely, which is a far worse failure than losing recordings.
 
 ### Supervision
 
-`systemd/rfsurvey@.service` runs one instance per receiver. `Restart=always`,
-because under a supervisor a clean exit is as unexpected as a crash. `KillSignal`
+`systemd/rfsurvey@.service` runs one instance per receiver. `Restart=on-failure`,
+not `always`: the survey is something you start and stop, the Pi has other uses,
+and a deck that comes back by itself after you deliberately stopped it is worse
+than one that does not run at all. A crash or a non-zero exit still restarts —
+that is the case worth recovering. `KillSignal`
 is SIGINT so the loop closes its in-flight events and coverage window rather than
 dying mid-transaction. The capture loop now counts consecutive empty reads and
 exits non-zero after `STALL_FRAMES`, because a wedged USB endpoint does not recover
@@ -446,29 +459,34 @@ no longer depends on `content`, so nothing is blocked by leaving it NULL. Revisi
 it with recorded audio from a real deployment — which `--capture-dir` now
 produces — rather than with more synthetic signals.
 
-**The DCS codeword table is not the real one, and 61 of 104 codes cannot be decoded
-because of it.** `src/dcs.py` implements Golay(23,12) correctly — that part is
-self-checking and tested, including error correction to the code's limit of three
-bits. What is not established is the mapping from a three-digit code to the 23 bits
-on the air. The code is *cyclic*, so all 23 rotations of a codeword are themselves
-codewords, and the all-ones vector is a codeword so the complement of one is too. A
-DCS transmission carries no sync pattern, just the word repeating forever, so
-framing rests entirely on the fixed triple and the list of legal codes — and under
-the convention implemented, transmitting 026 produces a bitstream that is also a
-legal framing of 311. Those are the same periodic sequence; no receiver could
-separate them. A real standard cannot have that property, so the real code set must
-be chosen so that no two legal codes are rotations or complements of each other, and
-the construction in `dcs.py` does not produce that set. Every plausible variation was
-searched — fixed triple 0 through 7, LSB and MSB first, with and without polarity
-search — and the best tops out at 70 of 104 framing uniquely.
+**DCS decoding is finished.** This was an open question and is now closed; kept
+here because the way it failed is instructive.
 
-The decoder therefore reports a code only where the framing is unambiguous and
-reports "DCS present, code unknown" otherwise, which is what it did before decoding
-existed. It never guesses: a wrong code sends you off to programme a radio that then
-sits silent. **To finish this**, replace the codeword construction in `dcs.py` with
-the real 23-bit word per code, from a verified reference or measured off a radio
-transmitting a known code. Nothing else changes — the decoder already matches
-against the table. `python3 src/dcs.py --check` prints 104/104 when it is right.
+The module shipped with the wrong Golay generator polynomial. 0xC75 and its
+reciprocal 0xAE3 both generate a perfect binary Golay code, both round-trip, both
+correct three bit errors, and both satisfy every internal consistency check the
+code can run — so every codeword it produced was a valid codeword of the wrong
+code, and nothing self-contained could have noticed. It took one decoded off-air
+word to settle it: DCS 023 is `100 000010011 11101100011`, and that single
+reference is now a test.
+
+The apparent ambiguity was also a misreading. Because the code is cyclic and
+all-ones is a codeword, every rotation and complement of a codeword is a codeword,
+which looked like it made blind framing impossible — and with the wrong polynomial
+and a guessed code list, 61 of 104 codes appeared undecodable. With the right
+polynomial and the real 112-code list, every waveform has exactly **two** legal
+readings, one normal and one inverted, and they are the same signal: transmitting
+023 normal *is* transmitting 047 inverted, and a radio set to either opens on it.
+That is the inverted-code pairing radio documentation lists. `dcs.INVERTED_PAIR`
+derives it from the codewords and asserts on import that every code pairs cleanly,
+so a future edit to the table that breaks the property fails at import rather than
+in the field.
+
+The decoder reports the normal reading, which every waveform has exactly one of.
+Measured against synthetic signals: every code decodes at 0.9 s and 1.4 s dwell,
+in both polarities, down to ~17 dB in-channel SNR, with zero wrong codes, zero
+CTCSS tones misread as DCS, and zero decodes from pure noise. `python3 src/dcs.py`
+prints the table's self-check.
 
 **Ham segments are ARRL national, not NESMC.** Correct for the country, wrong in detail
 for Massachusetts. Every row carries a `source` column; re-seeding replaces them by
@@ -476,12 +494,14 @@ for Massachusetts. Every row carries a `source` column; re-seeding replaces them
 
 **Deviation measurement accuracy is unverified against real signals.** The FRS/GMRS rule
 depends on it. The *estimator* is now checked against known synthetic deviations in
-`--selftest` and lands within 4% of true peak, and its weak-signal behaviour is
+`tests/test_analyze.py` and lands within 15% of true peak, and its weak-signal behaviour is
 characterised in section 3 — but nothing has measured a real transmitter through a real
 receiver. Note how little that guarantee was worth by itself: the estimator was
 accurate to 4% in isolation while reporting pure noise for every event the deck
 actually logged, because the window it was handed in the field was not the window it
-had been tested on (section 4). Phase 3 should transmit a known narrowband signal and a known wideband one, at
+had been tested on (section 4). It then measured excursion from the *channel grid*
+rather than from the carrier, which added the transmitter's offset from its grid slot
+to every answer (section 6). Phase 3 should transmit a known narrowband signal and a known wideband one, at
 several distances, and compare against what the deck reports. If it is sloppy, raise
 `DEV_EVIDENCE_MARGIN_HZ` or `DEV_MIN_SNR_DB` until false positives stop. Occupied
 bandwidth is still measured by nothing; `events.bandwidth_hz` is NULL on every row the
@@ -489,22 +509,120 @@ deck produces.
 
 ---
 
-## 6. Not recoverable from the repository
+## 6. Third pass: a code review of the whole repository
 
-`rm -rf *` in the home directory on 2026-08-19 destroyed five design documents that were
-never restored: `design-decisions.md`, `bench-bringup.md`, `rf-primer.md`,
-`pi-architecture.md`, `phase1-detail.md`. The bench bring-up plan in particular is the
-nine-phase gated procedure to follow the day the Airspys arrive — it exists only in the
-original design conversations. Restore it before hardware lands.
+Nothing here was found by running the deck. It came from reading every file and
+then checking the readings against measurements, which is why most of it is
+small and two items are not.
 
-`docs/band-plan-notes.md` was written but never installed, and its coverage section
-describes the old 153.200 MHz VHF window rather than the current 154.950.
+### The two that matter
+
+**Deviation was measured from the channel grid, not from the carrier.**
+`p99(|inst|)` left the DC term in, and that term is however far the transmitter
+sits from the 6.25 kHz slot it was filed under:
+
+```
+carrier off grid    0 Hz     1250 Hz    2500 Hz    3125 Hz
+reported (2.4 kHz)  2326      3539       4788       5414
+```
+
+Eleven of the 85 seeded channels are off-grid by 1250–2500 Hz — **every MURS
+channel**, several Part 90 VHF dots, and 146.520 — so a narrowband signal on one
+of them read wide, and wide is the verdict that rules FRS out. The FRS and GMRS
+channels themselves are all on-grid, so the discriminator was not mislabelling
+in practice; the number in `channels.deviation_hz` and `v_contactable.dev_hz`
+was wrong on the VHF channels, and it reads as evidence. `freq_error` is
+subtracted before the percentile now. 146.520 went 3613 → 2448 Hz in the capture
+path. Any deviation figure recorded before 2026-08-19 on those channels is high
+by its grid offset.
+
+**A burst of interference in the pretrigger defeated the analysis trim.** The
+trim took its edges from the first and last sample over threshold, so anything
+early in the lead-in anchored it at the start of the window and the whole
+carrier-free run came back in — deviation ~11500 Hz, the noise figure, which is
+section 4's bug arriving through a different door. 0.05 ms of interference is
+enough; a single sample is not, because the decimation filter absorbs it. The
+envelope is smoothed before thresholding and the edges come from a percentile of
+the crossings. Regression test in `tests/test_analyze.py`.
+
+### Things that silently did nothing
+
+- `deck-check.sh` looked for `survey_prototype.py` in four places, none of them
+  `src/`, so the Phase 0 selftest never ran and printed "not found" instead.
+- `detection.min_duration_s` and `detection.hang_s` were in the profile and read
+  by nobody. `EventTracker` used its own defaults, which happened to be the same
+  numbers — so editing the profile changed nothing and said nothing. Same for
+  `receivers.*.attenuator_db` and `.antenna`, which have had columns since v2
+  and were NULL on every real run.
+- `conn.commit()` in the capture loop was a no-op. `db.connect` opens with
+  `isolation_level=None`, so every statement commits as it executes; the calls
+  read as transaction boundaries and were not.
+- `migrate.apply()` stamped the target version when no migration reached it,
+  which would mark a database as upgraded by a step that does not exist.
+- `festival_scenario` had traffic for one of the three VHF windows, so the
+  rotation command in section 1 logged one event and two windows of silence
+  indistinguishable from a broken detector. Every window has traffic now and
+  `--simulate` announces what each one can hear.
+- The tier 0 fixture capped keyups at 1.0 s, written when the analysis dwell was
+  1.4 s. The dwell is 0.9 s now, so 464.500 had moved to tier 1 while every
+  document still called it the tier 0 case. It tracks `ANALYZE_SECONDS`.
+
+### Shape
+
+`run()` was 432 lines and four levels deep, so the only way to exercise any of
+it was to run the whole loop. It is now `resolve_settings`, `Radio`, `Detector`
+and `CaptureLoop`, split along the seam the retune already implied — console
+output and database rows are identical on both simulate runs.
+
+`selftest()` was 312 lines and correctness had migrated into `tests/`
+underneath it. It keeps sizing and speed, which is a property of the machine
+and the one thing no unit test can answer; **`bash tools/run-tests.sh` is
+correctness now**, and `deck-check.sh` runs both. Three checks that existed only
+in the selftest moved into the suite first.
+
+`schema.sql` is `schema_v2.sql`. It describes a database that has not existed
+since v2 and calling it the schema invited reading it as one.
+
+The end-to-end test drove the capture loop from `setUp`, so 24 methods meant 24
+identical runs — 87 s of the suite's 147 s. One run per class now; the suite is
+68 s.
+
+Deleted: `tools/apply-v2.sh` and `apply-v4.sh`, 326 lines describing how to
+upgrade to schema versions four and five behind current.
 
 ---
 
-## 7. Housekeeping still outstanding
+## 7. The design documents — restored
 
-- README points at `tools/phase-log.md`; the file is `docs/phase_log.md`
+`rm -rf *` in the home directory on 2026-08-19 destroyed five design documents. **They were
+restored and are in the repository**, tracked as of b304e79:
+
+```
+docs/bench-bringup.md     788 lines   the nine-phase gated procedure. Read on delivery day.
+docs/phase1-detail.md     450 lines   Phase 1 broken out, desktop assumptions removed
+docs/design-decisions.md  342 lines   what was chosen, what was rejected, why
+docs/pi-architecture.md   334 lines   where things live on radio-deck
+docs/rf-primer.md         270 lines   the radio concepts, for a systems reader
+```
+
+An earlier version of this section said they were lost and had to be restored before
+hardware landed. That was already untrue when it was written — they were restored in the
+same commit. Corrected 2026-08-19 after checking the machine rather than the note.
+
+`docs/band-plan-notes.md` is installed and current: its coverage section gives the VHF
+window as 154.950 with the reasoning, not the old 153.200. That warning is also cleared.
+
+**`bench-bringup.md` carries its own copy of the phase table**, and it does not know about
+anything in sections 3, 4 or 6 above. Its Phase 0 line still reads "28.8% of one core",
+which was measured before short transmissions were analysed at all, before DCS decoding,
+and before captures were written to disk. Re-measure before trusting it — see section 5.
+Its Phase 0 procedure now names both `--selftest` and `tools/run-tests.sh`, because as
+of section 6 the selftest no longer checks correctness.
+
+---
+
+## 8. Housekeeping still outstanding
+
 - DHCP reservation for `radio-deck` — it moved .243 to .244 mid-session once already
 - WiFi power save disabled via systemd oneshot (no NetworkManager on Ubuntu Server)
 - Map physical USB ports to buses and label the case. The two Airspys must land on

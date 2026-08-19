@@ -13,9 +13,10 @@ that happens after 1.26 s, so a 30-second ham QSO logged as 1.27 seconds.
 
 import unittest
 
+import support  # noqa: F401  — puts src/ on sys.path
+
 import numpy as np
 
-from support import SRC  # noqa: F401
 
 from survey_prototype import FLOOR_FRAMES, FLOOR_PCTILE, NoiseFloor
 

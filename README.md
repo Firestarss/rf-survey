@@ -30,7 +30,7 @@ data/        gitignored, disposable
 ## Running
 
 ```bash
-python3 src/survey_prototype.py --selftest     # no hardware needed
+python3 src/survey_prototype.py --selftest     # sizing and speed, no hardware
 python3 src/survey_prototype.py --spectrum     # headless PNG + text peak list
 tools/deck-check.sh                            # soak and diagnostics
 ```

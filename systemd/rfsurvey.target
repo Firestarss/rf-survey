@@ -1,0 +1,14 @@
+[Unit]
+# One handle for the whole survey, so both receivers start and stop together:
+#
+#   sudo systemctl start rfsurvey.target
+#   sudo systemctl stop  rfsurvey.target
+#
+# The instances list themselves as PartOf= this target, which is what makes the
+# stop propagate. Wants= rather than Requires= so that one radio failing to come
+# up does not take the other down with it - half a survey is worth more than none.
+Description=RF survey deck (both receivers)
+Wants=rfsurvey@uhf.service rfsurvey@vhf.service
+
+[Install]
+WantedBy=multi-user.target

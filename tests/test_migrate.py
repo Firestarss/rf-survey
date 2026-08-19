@@ -12,7 +12,7 @@ performs an implicit DELETE and empties `decodes` silently.
 import sqlite3
 import unittest
 
-from support import SRC, TempDirCase, build_at_version, schema_of  # noqa: F401
+from support import TempDirCase, build_at_version, schema_of
 
 import db
 import migrate
@@ -21,7 +21,7 @@ import migrate
 class TestMigrationStructure(unittest.TestCase):
 
     def test_versions_are_contiguous(self):
-        # schema.sql stamps v2 and init_schema replays from there. A gap would
+        # schema_v2.sql stamps v2 and init_schema replays from there. A gap would
         # leave apply() unable to reach the target and fail only on a fresh build.
         versions = sorted(migrate.MIGRATIONS)
         self.assertEqual(versions, list(range(3, max(versions) + 1)))

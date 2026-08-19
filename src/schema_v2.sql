@@ -1,4 +1,14 @@
--- rfsurvey schema v2
+-- rfsurvey schema v2 — THE BASELINE, NOT THE CURRENT SHAPE
+--
+-- This is where every database starts. It is not what one looks like: v3 to v8
+-- live in migrate.py, and init_schema() runs this and then replays all of them,
+-- so `events` here is missing eight columns that every real row has. Read
+-- migrate.MIGRATIONS for the rest, or ask a built database with
+-- `python3 src/db.py <path>`.
+--
+-- Do not add anything here. A column added here as well as in a migration makes
+-- that migration's ALTER TABLE fail with "duplicate column name" on every fresh
+-- build. Migrations own the schema past v2; this file is frozen.
 --
 -- Changed from v1: band_plan stores frequency RANGES, not single frequencies.
 -- A discrete channel is a narrow range; a ham band segment is a wide one. Lookup is
@@ -185,65 +195,12 @@ CREATE TABLE IF NOT EXISTS pairs (
 
 -- ---------------------------------------------------------------------------
 -- Views
+--
+-- None here on purpose. v2 defined v_events, v_contactable and v_activity, and
+-- migrations 4 and 5 drop and recreate all three — so every fresh build created
+-- them only to replace them a moment later. Views hold no data and a migration
+-- can rebuild one freely, which is why they live there and not here.
 -- ---------------------------------------------------------------------------
-
-CREATE VIEW IF NOT EXISTS v_events AS
-SELECT
-    e.id,
-    datetime(e.t_start, 'unixepoch')            AS utc,
-    e.receiver_id,
-    printf('%.4f', e.freq_hz / 1e6)             AS mhz,
-    printf('%.2f', e.duration_s)                AS secs,
-    e.modulation,
-    e.content,
-    CASE
-        WHEN e.ctcss_hz IS NOT NULL THEN printf('CTCSS %.1f', e.ctcss_hz)
-        WHEN e.dcs_code IS NOT NULL THEN printf('DCS %03d%s', e.dcs_code,
-                                                COALESCE(e.dcs_polarity,''))
-        ELSE NULL
-    END                                          AS tone,
-    printf('%.1f', e.snr_db)                     AS snr,
-    COALESCE(c.label, b.label)                   AS label
-FROM events e
-LEFT JOIN channels  c ON c.id = e.channel_id
-LEFT JOIN band_plan b ON b.id = e.band_plan_id
-ORDER BY e.t_start;
-
-CREATE VIEW IF NOT EXISTS v_contactable AS
-SELECT
-    printf('%.4f', c.freq_hz / 1e6)             AS mhz,
-    c.service,
-    c.label,
-    c.modulation,
-    CASE
-        WHEN c.ctcss_hz IS NOT NULL THEN printf('CTCSS %.1f', c.ctcss_hz)
-        WHEN c.dcs_code IS NOT NULL THEN printf('DCS %03d%s', c.dcs_code,
-                                                COALESCE(c.dcs_polarity,''))
-        ELSE NULL
-    END                                          AS tone,
-    c.tier,
-    c.event_count,
-    printf('%.0f', c.total_airtime_s)            AS airtime_s,
-    datetime(c.last_seen, 'unixepoch')           AS last_heard,
-    CASE WHEN p.id IS NOT NULL
-         THEN printf('%.4f in', pi.freq_hz / 1e6) END AS repeater_input
-FROM channels c
-LEFT JOIN pairs    p  ON p.id = c.pair_id
-LEFT JOIN channels pi ON pi.id = p.input_channel_id
-WHERE c.tier IS NOT NULL
-ORDER BY c.tier DESC, c.total_airtime_s DESC;
-
-CREATE VIEW IF NOT EXISTS v_activity AS
-SELECT
-    printf('%.4f', freq_hz / 1e6)                AS mhz,
-    COUNT(*)                                     AS keyups,
-    printf('%.0f', SUM(duration_s))              AS airtime_s,
-    printf('%.1f', AVG(snr_db))                  AS avg_snr,
-    datetime(MIN(t_start), 'unixepoch')          AS first,
-    datetime(MAX(t_start), 'unixepoch')          AS last
-FROM events
-GROUP BY freq_hz
-ORDER BY SUM(duration_s) DESC;
 
 -- ---------------------------------------------------------------------------
 -- Schema version

@@ -32,7 +32,7 @@ system integration at all.
 ├── profiles/
 │   └── festival.yaml           receiver assignments (see §5)
 └── data/                       gitignored — everything below is disposable
-    ├── bench.sqlite
+    ├── survey.sqlite            the one survey database
     ├── spectrum/               PNGs from --spectrum
     └── soak/                   CSVs from deck-check
 ```
@@ -305,7 +305,7 @@ entirely plausible.
 | Create the git repo, move the files in | `/opt`, `/etc`, `/var/lib` layout |
 | Add the udev rule, join `plugdev` | Service user |
 | Write `profiles/festival.yaml`, even partially | systemd units |
-| Start `tools/phase-log.md` | Watchdog heartbeat |
+| Start `docs/phase_log.md` | Watchdog heartbeat |
 | — | Rotation rules |
 | — | Read-only query interface |
 

@@ -25,7 +25,7 @@ import time
 import migrate
 
 SCHEMA_VERSION = 8
-SCHEMA_PATH = pathlib.Path(__file__).with_name("schema.sql")
+SCHEMA_PATH = pathlib.Path(__file__).with_name("schema_v2.sql")
 
 
 def connect(path: str, *, readonly: bool = False) -> sqlite3.Connection:
@@ -55,10 +55,10 @@ def _read_version(db: sqlite3.Connection) -> int | None:
 def init_schema(path: str) -> None:
     """Create or upgrade the database. Safe to call on an existing one.
 
-    schema.sql describes a fresh database and stamps its own version. Running it
-    against an already-migrated database would stamp that older version back and
-    make the migration runner replay steps that have already happened, so the
-    prior version is read first and restored afterwards.
+    schema_v2.sql is the baseline every database starts from, and it stamps v2.
+    Running it against an already-migrated database would stamp that older
+    version back and make the migration runner replay steps that have already
+    happened, so the prior version is read first and restored afterwards.
     """
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = connect(path)

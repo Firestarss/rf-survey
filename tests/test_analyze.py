@@ -11,9 +11,10 @@ shaped like the ones the capture loop actually produces.
 
 import unittest
 
+import support  # noqa: F401  — puts src/ on sys.path
+
 import numpy as np
 
-from support import SRC  # noqa: F401
 
 import dcs
 import survey_prototype as proto
@@ -87,6 +88,25 @@ class TestSignalTrim(unittest.TestCase):
         got = proto.analyze_analog(window(0.8, lead_s=0.6), RATE, OFFSET)
         self.assertAlmostEqual(got["analyzed_s"], 0.8, delta=0.12)
 
+    def test_a_burst_in_the_lead_in_does_not_defeat_the_trim(self):
+        # The trim used to take its edges from the first and last sample over
+        # threshold, so any interference early in the pretrigger anchored it at
+        # the start of the window and the whole lead-in came back in. The
+        # deviation then reported ~11500 Hz — the noise figure — which is the
+        # exact failure the trim exists to prevent, and "wide" is the verdict
+        # that rules FRS out. Sub-millisecond is enough; it survives the
+        # decimation filter, unlike a single sample.
+        base = proto.analyze_analog(window(0.9), RATE, OFFSET)["deviation_hz"]
+        for burst_ms in (0.05, 1.0, 5.0):
+            iq = window(0.9, lead_s=0.5)
+            start = int(0.0001 * RATE)
+            iq[start:start + int(burst_ms / 1000 * RATE)] = 5.0 + 0j
+            got = proto.analyze_analog(iq, RATE, OFFSET)["deviation_hz"]
+            self.assertAlmostEqual(
+                got, base, delta=300,
+                msg=f"a {burst_ms} ms burst in the lead-in moved deviation to "
+                    f"{got:.0f} Hz")
+
     def test_a_tone_survives_the_trim(self):
         got = proto.analyze_analog(window(1.2, lead_s=0.4, tone=141.3),
                                    RATE, OFFSET)
@@ -133,7 +153,37 @@ class TestDwellGating(unittest.TestCase):
             np.zeros(1000, np.complex64), RATE, OFFSET))
 
 
+class TestDeviationAccuracy(unittest.TestCase):
+    """What the estimator reports against a known input.
+
+    The FRS/GMRS rule is a threshold on this number, so this is the whole
+    question. Synthetic only: it closes the estimator half of "measurement
+    accuracy unverified", not the receiver half, which needs a real transmitter
+    in Phase 3.
+    """
+
+    def test_reported_deviation_tracks_the_true_peak(self):
+        for voice_dev in (1500.0, 3000.0, 5000.0):
+            t = np.arange(int(RATE * 1.4)) / RATE
+            voice = (0.6 * np.sin(2 * np.pi * 900 * t)
+                     + 0.4 * np.sin(2 * np.pi * 1700 * t))
+            true_peak = voice_dev * float(np.max(np.abs(voice)))
+            got = proto.analyze_analog(
+                proto.make_fm(None, RATE, voice_dev=voice_dev),
+                RATE, OFFSET)["deviation_hz"]
+            self.assertAlmostEqual(
+                got / true_peak, 1.0, delta=0.15,
+                msg=f"true peak {true_peak:.0f} Hz reported as {got:.0f} Hz")
+
+
 class TestToneAndCode(unittest.TestCase):
+
+    def test_a_weak_tone_in_noise_is_still_identified(self):
+        # Low tone deviation and ten times the usual noise. The tone stage has
+        # to work on the quiet, distant handheld, not just the loud repeater.
+        got = proto.analyze_analog(
+            proto.make_fm(88.5, RATE, tone_dev=450.0, noise=0.5), RATE, OFFSET)
+        self.assertEqual(got["ctcss_hz"], 88.5)
 
     def test_confidence_never_exceeds_one(self):
         # events.confidence is CHECK-constrained to [0,1] and the Hann-gain
@@ -159,7 +209,7 @@ class TestToneAndCode(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_dcs_decodes_and_reports_its_error_count(self):
-        code = sorted(dcs.UNAMBIGUOUS_CODES)[0]
+        code = sorted(dcs.STANDARD_CODES)[0]
         bits = np.array([1.0 if b else -1.0
                          for b in dcs.bit_sequence(code, "N")])
         got = proto.analyze_analog(
@@ -168,18 +218,31 @@ class TestToneAndCode(unittest.TestCase):
         self.assertEqual(got["dcs_polarity"], "N")
         self.assertIn(got["dcs_errors"], (0, 1, 2, 3))
 
-    def test_ambiguous_codes_are_flagged_but_never_named(self):
-        ambiguous = [c for c in dcs.STANDARD_CODES
-                     if c not in dcs.UNAMBIGUOUS_CODES]
-        for code in ambiguous[:6]:
+    def test_an_inverted_transmission_reads_as_its_partner(self):
+        # Sending X inverted is the same waveform as sending INVERTED_PAIR[X]
+        # normally, so that is the correct answer, not a misread. A radio
+        # programmed to either opens on it.
+        for code in list(dcs.STANDARD_CODES)[:4]:
+            bits = np.array([1.0 if b else -1.0
+                             for b in dcs.bit_sequence(code, "I")])
+            got = proto.analyze_analog(
+                proto.make_fm(None, RATE, dcs_word=bits), RATE, OFFSET)
+            self.assertEqual(got["dcs_code"], int(dcs.INVERTED_PAIR[code]),
+                             f"{code} sent inverted should read as "
+                             f"{dcs.INVERTED_PAIR[code]}")
+            self.assertEqual(got["dcs_polarity"], "N",
+                             "the normal reading is the canonical one")
+
+    def test_codes_across_the_whole_table_decode(self):
+        # Spread over the list rather than the first few, so a construction that
+        # only happens to work at one end of the code space fails here.
+        for code in list(dcs.STANDARD_CODES)[::16]:
             bits = np.array([1.0 if b else -1.0
                              for b in dcs.bit_sequence(code, "N")])
             got = proto.analyze_analog(
-                proto.make_fm(None, RATE, dcs_word=bits), RATE, OFFSET)
-            self.assertIsNone(got["dcs_code"],
-                              f"{code} is ambiguous and must not be named")
-            self.assertTrue(got["dcs_suspected"],
-                            "presence is still knowledge and still caps at tier 2")
+                proto.make_fm(None, RATE, dcs_word=bits, noise=0.5),
+                RATE, OFFSET)
+            self.assertEqual(got["dcs_code"], int(code))
 
     def test_random_noise_produces_no_codeword(self):
         for seed in range(6):

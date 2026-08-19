@@ -16,9 +16,12 @@ import argparse
 import contextlib
 import io
 import os
+import pathlib
+import shutil
+import tempfile
 import unittest
 
-from support import PROFILE, SRC, TempDirCase  # noqa: F401
+from support import PROFILE, TempDirCase
 
 import db
 import dcs
@@ -28,7 +31,7 @@ import survey_prototype as proto
 SKIP = os.environ.get("RFSURVEY_SKIP_SLOW") == "1"
 RATE = 2.4e6
 UHF = 466_000_000
-DCS_CODE = sorted(dcs.UNAMBIGUOUS_CODES)[0]
+DCS_CODE = sorted(dcs.STANDARD_CODES)[0]
 
 # Placed at least two grid channels apart so the local-maximum rule keeps them
 # distinct, and staggered so each duration is attributable to one transmission.
@@ -69,20 +72,60 @@ def drive(args, scenario_fn):
     return rc, out.getvalue()
 
 
-@unittest.skipIf(SKIP, "RFSURVEY_SKIP_SLOW=1")
-class TestParkedRun(TempDirCase):
+class CaptureRunCase(TempDirCase):
+    """One capture run per class, shared by every test that reads its database.
+
+    The run is the expensive part — it synthesises and processes real sample
+    streams — and it is deterministic, so driving it once per test method meant
+    24 identical runs and about ninety seconds. Each test still gets its own
+    connection, and anything that writes works on a copy.
+    """
+
+    @classmethod
+    def scenario_fn(cls):
+        """The transmissions this class's run should see."""
+        raise NotImplementedError
+
+    @classmethod
+    def run_args(cls, workdir):
+        """Anything beyond the defaults in args_for(), given a scratch dir."""
+        return {}
 
     @classmethod
     def setUpClass(cls):
-        cls._shared = None
+        cls._dir = pathlib.Path(tempfile.mkdtemp(prefix="rfsurvey-e2e-"))
+        cls.addClassCleanup(shutil.rmtree, cls._dir, ignore_errors=True)
+        cls.dbpath = str(cls._dir / "e2e.sqlite")
+        cls.rc, cls.log = drive(
+            args_for(cls.dbpath, **cls.run_args(cls._dir)), cls.scenario_fn())
 
     def setUp(self):
         super().setUp()
-        self.dbpath = self.path("e2e.sqlite")
-        self.capdir = self.path("caps")
-        self.rc, self.log = drive(
-            args_for(self.dbpath, capture_dir=self.capdir), scenario)
         self.conn = db.connect(self.dbpath)
+        self.addCleanup(self.conn.close)
+
+    def scratch_copy(self):
+        """The run's database, copied, for a test that needs to write to it."""
+        path = self.path("scratch.sqlite")
+        shutil.copy(self.dbpath, path)
+        conn = db.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+
+@unittest.skipIf(SKIP, "RFSURVEY_SKIP_SLOW=1")
+class TestParkedRun(CaptureRunCase):
+
+    @classmethod
+    def scenario_fn(cls):
+        return scenario
+
+    @classmethod
+    def run_args(cls, workdir):
+        return dict(capture_dir=str(workdir / "caps"))
+
+    def setUp(self):
+        super().setUp()
         self.events = self.conn.execute(
             "SELECT * FROM events ORDER BY t_start").fetchall()
 
@@ -227,46 +270,45 @@ class TestParkedRun(TempDirCase):
         # consume; the fixtures prove the enricher works on synthetic rows, not
         # on rows this code path actually writes.
         import enrich
+        conn = self.scratch_copy()      # the only test here that writes
         with contextlib.redirect_stdout(io.StringIO()):
-            enrich.tag(self.conn)
-            n = enrich.rollup(self.conn)
-            enrich.pair(self.conn)
-            tiers = enrich.score(self.conn, {"gmrs", "frs"})
+            enrich.tag(conn)
+            n = enrich.rollup(conn)
+            enrich.pair(conn)
+            tiers = enrich.score(conn, {"gmrs", "frs"})
         self.assertEqual(n, len(PARKED_SCENARIO))
         self.assertTrue(all(t >= 1 for t in tiers.values()),
                         "every analysed channel should clear tier 0")
 
 
 @unittest.skipIf(SKIP, "RFSURVEY_SKIP_SLOW=1")
-class TestRotation(TempDirCase):
+class TestRotation(CaptureRunCase):
     """A rotating receiver must visit every window and say what it heard where."""
 
     WINDOWS = {"70cm ham": 446_000_000, "2m ham": 146_000_000,
                "MURS + VHF business": 154_950_000}
 
-    def setUp(self):
-        super().setUp()
-        self.dbpath = self.path("rot.sqlite")
-
+    @classmethod
+    def scenario_fn(cls):
         def rotating_scenario():
             return [simradio.Transmission(center + 12_500, 2.0, 1.2,
                                           deviation_hz=2400, snr_db=34,
                                           label=name)
-                    for name, center in self.WINDOWS.items()]
+                    for name, center in cls.WINDOWS.items()]
+        return rotating_scenario
 
-        # The dwell is deliberately far longer than the scenario. dwell_seconds
-        # is wall-clock, which is what a real deck wants — "spend three minutes
-        # on each band" — but the simulator produces sample time, and a Pi does
-        # not synthesise 2.4 MSPS in real time. A wall-clock dwell short enough
-        # to be quick would end each window part-way through its transmission,
-        # and how far through would depend on how busy the machine was. Letting
-        # the scenario run out is what advances the window here, so the test
-        # measures the retune logic rather than the speed of the host.
-        self.rc, self.log = drive(
-            args_for(self.dbpath, receiver_id="vhf", freq=None,
-                     dwell_seconds=3600.0, simulate=4.0),
-            rotating_scenario)
-        self.conn = db.connect(self.dbpath)
+    # The dwell is deliberately far longer than the scenario. dwell_seconds is
+    # wall-clock, which is what a real deck wants — "spend three minutes on each
+    # band" — but the simulator produces sample time, and a Pi does not
+    # synthesise 2.4 MSPS in real time. A wall-clock dwell short enough to be
+    # quick would end each window part-way through its transmission, and how far
+    # through would depend on how busy the machine was. Letting the scenario run
+    # out is what advances the window here, so the test measures the retune
+    # logic rather than the speed of the host.
+    @classmethod
+    def run_args(cls, workdir):
+        return dict(receiver_id="vhf", freq=None, dwell_seconds=3600.0,
+                    simulate=4.0)
 
     def test_every_window_was_visited(self):
         rows = self.conn.execute(

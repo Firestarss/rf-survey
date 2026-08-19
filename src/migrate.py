@@ -1,16 +1,17 @@
 """Incremental schema migrations.
 
-`schema.sql` describes the current shape for a *fresh* database. This applies the
-steps needed to bring an *existing* one up to that shape, so a schema change is a
-few lines here rather than a full rewrite of schema.sql and a rebuild.
+`schema_v2.sql` is the baseline every database starts from. This carries one
+the rest of the way, so a schema change is a few lines here rather than a rewrite
+of the baseline and a rebuild — and so a deployed database and a fresh one end up
+byte-identical, which test_migrate checks.
 
 Adding a migration:
   1. Append to MIGRATIONS with the next version number.
   2. Bump SCHEMA_VERSION in db.py.
 
-Do NOT mirror the change into schema.sql. That file describes a *v2* database and
-stamps v2; init_schema() runs it and then replays every migration on top. Adding a
-column there as well makes the matching `ALTER TABLE ... ADD COLUMN` fail with
+Do NOT mirror the change into schema_v2.sql. That file is frozen at v2;
+init_schema() runs it and then replays every migration on top, so a column added
+in both places makes the migration's `ALTER TABLE ... ADD COLUMN` fail with
 "duplicate column name" on every fresh build. Migrations own the schema past v2.
 
 Every statement must be safe to run against a database that already has real rows.
@@ -419,10 +420,9 @@ def apply(conn: sqlite3.Connection, target: int, verbose: bool = False) -> int:
                 f"migration left {len(broken)} dangling foreign key reference(s): "
                 f"{broken[:5]}")
 
-    if have < target:
-        # schema.sql already wrote the target version for a fresh database.
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?)",
-            (str(target),),
-        )
+    # Deliberately no fallback stamp for `have < target`. That can only happen
+    # when the target is past the last migration, and stamping it there would
+    # mark a database as upgraded by a step that does not exist. init_schema()
+    # compares the version afterwards and raises, which is the loud failure the
+    # situation deserves.
     return ran

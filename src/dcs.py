@@ -14,48 +14,52 @@ Of the 12 information bits, 9 carry the code as three octal digits and 3 are fix
 The fixed triple is a free correctness check: a random 23-bit window that happens to
 be a valid Golay codeword still fails it 7 times out of 8.
 
-    THE CODEWORD TABLE HERE IS NOT THE REAL ONE. Read this before trusting a code.
+    The word is [3 fixed bits][9 code bits][11 parity bits], most significant
+    first. The fixed triple is octal digit 4, so the twelve information bits read
+    as a four-digit octal number whose last three digits are the code.
 
-    The Golay arithmetic below is correct and tested. What is *not* established is
-    the mapping from a three-digit code to the 23 bits that go on the air.
+    Verified against a real off-air decode. DCS 023 is
 
-    The problem is structural. Golay(23,12) is a **cyclic** code, so every one of
-    the 23 rotations of a codeword is itself a valid codeword; the all-ones vector
-    is also a codeword, so the bit-complement of a codeword is one too. A DCS
-    transmission is the word repeated forever with no sync pattern, so a receiver
-    sees an infinite periodic bitstream and has to pick the framing itself. Golay
-    validity cannot do it — every framing is valid. Only the fixed triple and the
-    list of legal codes can.
+        100 000010011 11101100011
 
-    That is not enough here. Under the convention implemented below, transmitting
-    026 yields a bitstream that is also a legal framing of 311: the two are the
-    same periodic sequence, so no receiver could ever separate them. A real
-    standard cannot have that property, which means the real code set is chosen so
-    that no two legal codes are rotations or complements of each other — and the
-    construction below does not produce that set. Searching every plausible
-    variation of the convention (fixed triple 0..7, LSB and MSB first, with and
-    without polarity search) tops out at 70 of 104 codes framing uniquely.
+    and this module reproduces it exactly. The same check settled the generator
+    polynomial, which is not guessable: 0xC75 and its reciprocal 0xAE3 both
+    generate a perfect binary Golay code and both pass every internal consistency
+    test this file can run, but only one is the code DCS uses. This module had the
+    wrong one until the off-air word was checked against it, and everything it
+    produced before that was a valid codeword of the wrong code.
 
-    So `decode()` reports a code only when the framing is unambiguous, and the
-    decoder in survey_prototype refuses to guess otherwise. It will report "DCS
-    present, code unknown" — which is exactly what it did before — rather than a
-    confident wrong answer. A wrong CTCSS/DCS code is worse than none: it sends
-    you off to programme a radio that stays silent.
-
-    TO FINISH THIS: replace CODEWORDS below with the real 23-bit word for each
-    standard code, from a verified reference or measured off a radio transmitting
-    a known code. Nothing else has to change — the decoder already matches against
-    the table. `python3 src/dcs.py --check` reports how many codes frame uniquely,
-    and should print 104/104 once the table is right.
-"""
+    On framing. A DCS stream is one word repeating forever with no sync pattern,
+    the code is cyclic, and all-ones is a codeword - so every rotation and every
+    complement is also a valid codeword, and blind decoding looks hopeless. The
+    restricted code list resolves it: across the standard codes every waveform has
+    exactly two legal readings, one normal and one inverted, and they are the same
+    signal. Transmitting 023 normal *is* transmitting 047 inverted, and a radio set
+    to either opens on it. That is the inverted-code pairing radio documentation
+    lists; INVERTED_PAIR derives it from the codewords rather than transcribing it,
+    and asserts on import that every code pairs cleanly. The decoder reports the
+    normal reading, which every waveform has exactly one of.
+    """
 
 from __future__ import annotations
 
 import itertools
 
-# g(x) = x^11 + x^9 + x^7 + x^6 + x^5 + x + 1. Either this or its reciprocal
-# generates the binary Golay code; they differ only in bit order convention.
-GOLAY_POLY = 0xAE3
+# g(x) = x^11 + x^10 + x^6 + x^5 + x^4 + x^2 + 1.
+#
+# Both this and its reciprocal 0xAE3 generate *a* binary Golay code, and either
+# will pass the perfect-code check below — which is why picking the wrong one is
+# not self-evident. DCS uses this one. Verified against a decoded off-air
+# example: DCS 023 is the 23-bit word
+#
+#     100 000010011 11101100011
+#     ^   ^         ^
+#     |   |         11 parity bits
+#     |   9 code bits, 000010011 = 0o023
+#     3 fixed bits, octal digit 4
+#
+# 0xAE3 yields parity 11111101000 for that data and is simply a different code.
+GOLAY_POLY = 0xC75
 
 WORD_BITS = 23
 DATA_BITS = 12
@@ -64,29 +68,25 @@ FIXED_TRIPLE = 0b100        # information bits 9..11
 
 BPS = 134.4                 # bit rate; the word therefore repeats at 5.84 Hz
 
-# The standard three-digit octal codes in common use. Anything outside this list
-# decodes arithmetically but is not a code any radio will let you dial in, so it is
-# reported as a decode failure rather than as a surprising number. If a radio on
-# site offers a code that is not here, this tuple is what to extend.
+# The standard three-digit octal codes, from the RadioReference DCS table.
 #
-# This list is the only thing standing between "decoded" and "made up": Golay
-# correction maps EVERY 23-bit input to some codeword, so a window of pure noise
-# still yields a code. Noise clears the fixed triple 1 time in 8 and lands in this
-# list 104 times in 512, so a single random word is accepted 1 time in 39. That is
-# why the receiver requires the same code from repeated words rather than trusting
-# one decode — see decode_stream() in survey_prototype.py.
+# Only these are legal; the field is nine bits, so 512 values encode but a radio
+# will not let you dial in the rest. That restriction is load-bearing rather than
+# cosmetic — it is most of what stops a window of noise decoding to something
+# plausible.
 STANDARD_CODES = (
-    "023", "025", "026", "031", "032", "036", "043", "047", "051", "053",
-    "054", "065", "071", "072", "073", "074", "114", "115", "116", "122",
-    "125", "131", "132", "134", "143", "145", "152", "155", "156", "162",
-    "165", "172", "174", "205", "212", "223", "225", "226", "243", "244",
-    "245", "246", "251", "252", "255", "261", "263", "265", "266", "271",
-    "274", "306", "311", "315", "325", "331", "332", "343", "346", "351",
-    "356", "364", "365", "371", "411", "412", "413", "423", "431", "432",
-    "445", "446", "452", "454", "455", "462", "464", "465", "466", "503",
-    "506", "516", "523", "526", "532", "546", "565", "606", "612", "624",
-    "627", "631", "632", "654", "662", "664", "703", "712", "723", "731",
-    "732", "734", "743", "754",
+    "006", "007", "015", "017", "021", "023", "025", "026", "031", "032",
+    "036", "043", "047", "050", "051", "053", "054", "065", "071", "072",
+    "073", "074", "114", "115", "116", "122", "125", "131", "132", "134",
+    "141", "143", "145", "152", "155", "156", "162", "165", "172", "174",
+    "205", "212", "214", "223", "225", "226", "243", "244", "245", "246",
+    "251", "252", "255", "261", "263", "265", "266", "271", "274", "306",
+    "311", "315", "325", "331", "332", "343", "346", "351", "356", "364",
+    "365", "371", "411", "412", "413", "423", "431", "432", "445", "446",
+    "452", "454", "455", "462", "464", "465", "466", "503", "506", "516",
+    "523", "526", "532", "546", "565", "606", "612", "624", "627", "631",
+    "632", "654", "662", "664", "703", "712", "723", "731", "732", "734",
+    "743", "754"
 )
 
 
@@ -141,15 +141,16 @@ def encode(code: str) -> int:
     return golay_encode(code9 | (FIXED_TRIPLE << CODE_BITS))
 
 
-def decode(word23: int, *, standard_only: bool = True,
-           unique_only: bool = True) -> tuple[str, int] | None:
+def decode(word23: int, *, standard_only: bool = True) -> tuple[str, int] | None:
     """23-bit received word -> (octal code, bit errors), or None if it is not one.
 
-    Rejects on three independent grounds: the fixed triple not surviving Golay
-    correction, the code not being one a radio can be set to, and — unless
-    `unique_only` is off — the code not being one whose framing is unambiguous.
-    All three matter: Golay correction maps *every* input to some codeword, so
-    without them a window of noise decodes to a plausible code 1 time in 39.
+    Rejects on two independent grounds: the fixed triple not surviving Golay
+    correction, and the code not being one a radio can actually be set to. Both
+    matter, because Golay correction maps *every* input to some codeword - a
+    window of noise always "decodes" to something, and these two checks are what
+    make it not count. Together they still let one through about 1 time in 37,
+    which is why the stream decoder requires repeats to agree rather than
+    trusting any single word.
     """
     data, nerr = golay_decode(word23)
     if (data >> CODE_BITS) != FIXED_TRIPLE:
@@ -157,36 +158,63 @@ def decode(word23: int, *, standard_only: bool = True,
     code = format(data & ((1 << CODE_BITS) - 1), "03o")
     if standard_only and code not in STANDARD_CODES:
         return None
-    if unique_only and code not in UNAMBIGUOUS_CODES:
-        return None
     return code, nerr
 
 
-# Every code whose framing is unambiguous under the current table. Codes outside
-# this set are decodable only as "DCS present"; see the module docstring.
-def _unique_framings() -> frozenset[str]:
-    all1 = (1 << WORD_BITS) - 1
-    out = []
+def _inverted_pairs() -> dict[str, str]:
+    """code -> the code whose INVERTED transmission is the same waveform.
+
+    A DCS stream is one 23-bit word repeating forever with no sync pattern, so a
+    receiver has to try all 23 rotations, and it must try both polarities because
+    inverted DCS is a real thing radios send. The Golay code is cyclic, so every
+    rotation of a codeword is a codeword, and the all-ones vector is a codeword,
+    so every complement is one too. That sounds like hopeless ambiguity.
+
+    It is not, and the reason is the restricted code list. Across the standard
+    codes, every transmitted waveform presents exactly two legal readings: one
+    normal and one inverted. Transmitting 023 normal *is* transmitting 047
+    inverted — the same infinite bitstream, and a radio programmed to either will
+    open on it. This is the "inverted codes" pairing that radio documentation
+    lists, arrived at here from the codewords themselves.
+
+    So the decoder is never ambiguous and never has to guess. It reports the
+    normal reading, which every waveform has exactly one of.
+    """
+    all_ones = (1 << WORD_BITS) - 1
+    seen: dict[int, set] = {}
     for code in STANDARD_CODES:
         word = encode(code)
-        seen = set()
-        for pol in (0, all1):
-            v = word ^ pol
-            for r in range(WORD_BITS):
-                rotated = ((v >> r) | (v << (WORD_BITS - r))) & all1
-                got = decode(rotated, unique_only=False)
-                if got:
-                    seen.add(got[0])
-        if seen == {code}:
-            out.append(code)
-    return frozenset(out)
+        for polarity, base in (("N", word), ("I", word ^ all_ones)):
+            for rot in range(WORD_BITS):
+                rotated = ((base >> rot) | (base << (WORD_BITS - rot))) & all_ones
+                seen.setdefault(rotated, set()).add((code, polarity))
+
+    pairs = {}
+    for code in STANDARD_CODES:
+        word = encode(code)
+        family = set()
+        for rot in range(WORD_BITS):
+            rotated = ((word >> rot) | (word << (WORD_BITS - rot))) & all_ones
+            family |= seen.get(rotated, set())
+        other = sorted(c for c, p in family if p == "I")
+        if len(family) != 2 or len(other) != 1:
+            raise AssertionError(
+                f"{code} does not have exactly one normal and one inverted "
+                f"reading: {sorted(family)} — the codeword table is wrong")
+        pairs[code] = other[0]
+    return pairs
 
 
-UNAMBIGUOUS_CODES = _unique_framings()
+INVERTED_PAIR: dict[str, str] = _inverted_pairs()
 
 
 def bit_sequence(code: str, polarity: str = "N") -> list[int]:
-    """The 23 bits as transmitted, LSB first. 'I' inverts, as an inverted DCS does."""
+    """The 23 bits as transmitted, LSB first. 'I' inverts, as an inverted DCS does.
+
+    Note that `bit_sequence(c, "I")` is a rotation of
+    `bit_sequence(INVERTED_PAIR[c], "N")` — the same waveform. That is a property
+    of the standard, not of this implementation.
+    """
     word = encode(code)
     bits = [(word >> k) & 1 for k in range(WORD_BITS)]
     if polarity == "I":
@@ -197,16 +225,18 @@ def bit_sequence(code: str, polarity: str = "N") -> list[int]:
 
 
 def _check() -> int:
-    """Report how unambiguous the current table is. 104/104 means it is right."""
-    n = len(UNAMBIGUOUS_CODES)
+    """Self-consistency of the codeword table. Every code must pair cleanly."""
+    reference = int("100" "000010011" "11101100011", 2)
+    ok = encode("023") == reference
     print(f"Golay syndrome table: {len(_SYNDROMES)} cosets (perfect code)")
+    print(f"generator polynomial: 0x{GOLAY_POLY:X}")
+    print(f"off-air check, DCS 023 word matches reference: {ok}")
     print(f"standard codes:       {len(STANDARD_CODES)}")
-    print(f"unique framing:       {n}/{len(STANDARD_CODES)}")
-    if n < len(STANDARD_CODES):
-        print("\nThe codeword table is not the real one — see the module docstring.")
-        print("Codes without a unique framing are reported as 'DCS present, code")
-        print("unknown' rather than guessed at.")
-    return 0 if n == len(STANDARD_CODES) else 1
+    print(f"normal/inverted pairs: {len(INVERTED_PAIR)} "
+          f"(every waveform has exactly one reading of each polarity)")
+    sample = ", ".join(f"{c}N={INVERTED_PAIR[c]}I" for c in list(STANDARD_CODES)[:4])
+    print(f"  e.g. {sample}")
+    return 0 if ok and len(INVERTED_PAIR) == len(STANDARD_CODES) else 1
 
 
 if __name__ == "__main__":
