@@ -413,6 +413,60 @@ flag them, or record the parent they derive from.
 - **The overload hint recommended 20 dB** as costing "no usable sensitivity", which Phase 1
   measured as wrong — 20 dB leaves the antenna-versus-dummy delta at 0.7 dB. Corrected.
 
+### 2026-08-27, later: what the throughput work actually bought
+
+**The FFT was doing double-precision work on single-precision data.** `np.fft`
+promotes complex64 to complex128; scipy.fft respects the dtype. 2.454 -> 1.223 ms
+per frame for that alone, and 0.762 with two workers.
+
+**Analysis moved off the read thread.** One 91 ms `analyze_analog` against a
+6.55 ms frame is fourteen frames arriving with nobody collecting them, and the
+Airspy's USB buffer is 65536 samples with no way to deepen it —
+`getStreamArgsInfo` returns nothing at all. That latency, not average CPU, is
+what the overflows were. The job queue is two deep because each job carries
+~96 MB of IQ at 10 MSPS; when it is full the analysis is skipped and counted,
+which loses one row's detail rather than corrupting a whole window.
+
+**Two measurements that reversed a decision.** scipy's `workers=2` is clearly
+best in isolation and clearly worse in the running deck, because its threads
+contend with the analysis thread for the GIL:
+
+| | detect | fps | overflows |
+|---|---|---|---|
+| workers=1 | 2.23 ms | 143.5 | **22** |
+| workers=2 | 2.61 ms | 137.6 | 38 |
+
+And reading the Airspy's **native CS16 is worse than asking for CF32** — 2.279 ms
+per frame against 1.820 — because the driver's conversion beats anything numpy
+does. That closed off the obvious next optimisation.
+
+**Where the budget actually goes**, per 65536-sample frame at 10 MSPS against a
+6.55 ms real-time budget:
+
+```
+readStream           1.82 ms   28% of one core   IRREDUCIBLE
+periodogram          0.79 ms   12%
+everything else      0.56 ms    8%
+                     -------
+reader total         3.17 ms   48%
+```
+
+`readStream` costing 28% of a core to do nothing but read had never been
+measured, and it is the single largest item. Detector.step is 0.095 ms — 1.4% —
+so the detector was never the problem.
+
+**Result: 63 overflows -> 22 at gain 42, and zero at gain 30.** Not yet a pass.
+The remaining gap is GIL contention: the reader needs 3.17 ms of work per frame
+and gets 7.04 ms of wall time when the analysis thread is busy. Beating that
+needs analysis in a separate *process*, which means shared memory for 96 MB
+jobs, or an event rate low enough that analysis is not continuous.
+
+**The event rate is the real variable.** Boston at 466 MHz with `on_db = 10.0`
+produced **11040 events/hour** at gain 42 and almost none at gain 30. Those
+thresholds have never been tuned against real traffic — they were set from
+synthetic signals — and Phase 4 is where that happens. It is likely that the
+honest fix here is a threshold, not a thread.
+
 ### Outstanding for Gate 2
 
 - [ ] Zero overflows for an hour at 10 MSPS — needs the threading or optimisation work

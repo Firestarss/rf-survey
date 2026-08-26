@@ -28,6 +28,7 @@ import argparse
 import collections
 import math
 import pathlib
+import queue
 import shutil
 import signal
 import sys
@@ -37,6 +38,7 @@ import time
 import wave
 
 import numpy as np
+import scipy.fft as sfft
 from scipy.signal import firwin, lfilter, upfirdn
 
 import db
@@ -61,12 +63,41 @@ NFFT = 4096                # FFT size used for detection
 FRAME_SECONDS = 0.013      # target analysis frame duration — see frame_size()
 FLOOR_FRAMES = 120         # frames of history kept for the background estimate
 FLOOR_PCTILE = 25          # low percentile tracks quiet without signal bias
-FLOOR_EVERY = 10           # recompute the background every Nth frame
+FLOOR_EVERY = 20           # recompute the background every Nth frame. Was 10;
+                           # np.partition over 120 x n_channels cost 0.55 ms per
+                           # frame at 10 MSPS, 8% of a core, to re-estimate
+                           # something that does not change in 130 ms.
+# Clipping is a bulk property of a frame, so it does not need every sample. One
+# in four over 65536 still sees 16384, which resolves the 1e-4 threshold to
+# three significant figures and costs a quarter as much memory traffic.
+CLIP_STRIDE = 4
 # Channels spanned by the frequency-domain median that estimates the noise floor
 # for --spectrum. 21 channels is 131 kHz: an order of magnitude wider than any
 # signal in this band, and an order of magnitude narrower than the passband
 # shape it has to follow. See spectrum_floor().
 FLOOR_MEDIAN_CHANNELS = 21
+
+# Threads scipy hands the detection FFTs.
+#
+# The win here is not the threading: `np.fft` upcasts complex64 to complex128
+# and transforms in double precision on single-precision data, so simply moving
+# to scipy.fft — which respects the input dtype — is 2x on its own. Measured on
+# the Pi 5, 2026-08-27, one 65536-sample frame at 10 MSPS:
+#
+#     np.fft            2.454 ms/frame   37.4% of one core
+#     scipy workers=1   1.223 ms         18.7%
+#     scipy workers=2   0.762 ms         11.6%
+#     scipy workers=4   1.223 ms         18.7%
+#
+# So workers=2 looks best, and in isolation it is. **Under load it reverses.**
+# With the analysis worker running, measured against live traffic at gain 42:
+#
+#     workers=1   detect 2.23 ms/frame   143.5 fps   22 overflows
+#     workers=2   detect 2.61 ms/frame   137.6 fps   38 overflows
+#
+# The FFT's own threads contend with the analysis thread for the GIL, and the
+# extra parallelism costs more than it returns. One worker.
+FFT_WORKERS = 1
 
 # Front-end linearity check. Three gain settings, `COMPRESSION_GAIN_STEP` apart,
 # and the two increments must agree: a linear receiver moves its noise floor by
@@ -213,7 +244,11 @@ class Periodogram:
         if use == 0:
             return None
         segs = samples[:use].reshape(-1, self.nfft)
-        spec = np.fft.fftshift(np.fft.fft(segs * self.window, axis=1), axes=1)
+        # scipy rather than numpy: np.fft promotes complex64 to complex128 and
+        # transforms in double, which is pure waste on data that arrived from
+        # the radio as float32. See FFT_WORKERS.
+        spec = sfft.fftshift(sfft.fft(segs * self.window, axis=1,
+                                      workers=FFT_WORKERS), axes=1)
         return (np.abs(spec) ** 2).mean(axis=0) / (self.gain * self.rate)
 
 
@@ -399,7 +434,7 @@ class OverloadMonitor:
         self.desense_frames = 0
 
     def update(self, samples, power_db):
-        clip_frac = float(np.mean(np.abs(samples) > 0.9))
+        clip_frac = float(np.mean(np.abs(samples[::CLIP_STRIDE]) > 0.9))
         clipping = clip_frac > 1e-4
 
         wideband = float(np.median(power_db))
@@ -1295,6 +1330,28 @@ class EventLog:
         row = self.open_rows.get(ch)
         if row is None:
             return None
+        return self.apply(row, result, freq_hz)
+
+    def mark_harmonic(self, row, parent_row, n):
+        """Record that this row is a receiver product of `parent_row`.
+
+        Left otherwise as the detector wrote it: it keeps its frequency, its
+        timing and its SNR, because those are all genuinely measured. What it
+        does not get is analysis, which would copy the parent's tone onto it and
+        make it indistinguishable from real traffic.
+        """
+        self.conn.execute(
+            "UPDATE events SET harmonic_of = ?, harmonic_n = ? WHERE id = ?",
+            (int(parent_row), int(n), int(row)))
+
+    def apply(self, row, result, freq_hz):
+        """Fold a result into a row by id, whether or not its event is open.
+
+        Analysis runs on another thread now, so a short transmission can end —
+        and be removed from `open_rows` — before its own analysis comes back.
+        Keying the update on the row id rather than the channel is what stops
+        that result being silently dropped.
+        """
 
         # Four distinct claims, and the difference between the last two is the
         # whole point of tiering the analysis by dwell:
@@ -1738,6 +1795,81 @@ class Detector:
         return started, ended
 
 
+class AnalysisWorker:
+    """Runs analyze_analog off the read thread.
+
+    The reader must never block. One analysis measured 91 ms against a 6.55 ms
+    frame, so a single call is fourteen frames' worth of samples arriving with
+    nobody collecting them — and the Airspy's USB buffer is 65536 samples with
+    no way to deepen it, `getStreamArgsInfo` being empty. That latency, not
+    average CPU, is what produced 63 overflows in 45 s while the process sat at
+    under half a core.
+
+    Only `analyze_analog` moves. The ring is read on the reader thread and
+    `Ring.get` returns a copy, so the worker never touches the buffer; every
+    database write stays on the reader thread too. What crosses the boundary is
+    an array the reader has finished with and a dict of numbers coming back.
+
+    The job queue is deliberately shallow. Each job at 10 MSPS carries about
+    96 MB of IQ, and a deep queue would trade a bounded overflow problem for an
+    unbounded memory one. When it is full the analysis is **skipped and
+    counted**: the event is still detected, logged and timed, it simply stays at
+    tier 0. Dropping an analysis loses one row's detail; dropping samples
+    corrupts every measurement in the window.
+    """
+
+    def __init__(self, rate, depth=2):
+        self.rate = rate
+        self.jobs = queue.Queue(maxsize=depth)
+        self.results = queue.Queue()
+        self.skipped = 0
+        self.thread = threading.Thread(target=self._run, name="analysis",
+                                       daemon=True)
+        self.thread.start()
+
+    def submit(self, ch, row, iq, offset_hz, freq_hz, snr_db, keep_signals):
+        try:
+            self.jobs.put_nowait((ch, row, iq, offset_hz, freq_hz, snr_db,
+                                  keep_signals))
+            return True
+        except queue.Full:
+            self.skipped += 1
+            return False
+
+    def _run(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            ch, row, iq, offset_hz, freq_hz, snr_db, keep = job
+            t0 = time.perf_counter()
+            try:
+                result = analyze_analog(iq, self.rate, offset_hz,
+                                        keep_signals=keep)
+            except Exception as exc:              # never kill the worker
+                print(f"  analysis failed on {freq_hz/1e6:.4f} MHz: {exc}",
+                      file=sys.stderr)
+                result = None
+            ms = (time.perf_counter() - t0) * 1000.0
+            self.results.put((ch, row, result, freq_hz, snr_db, ms))
+
+    def drain(self):
+        out = []
+        while True:
+            try:
+                out.append(self.results.get_nowait())
+            except queue.Empty:
+                return out
+
+    def stop(self, timeout=5.0):
+        """Let the queued work finish, then retire the thread."""
+        try:
+            self.jobs.put(None, timeout=timeout)
+        except queue.Full:
+            return
+        self.thread.join(timeout=timeout)
+
+
 class CaptureLoop:
     """One run of the deck: a radio, a database, and the loop between them.
 
@@ -1762,6 +1894,9 @@ class CaptureLoop:
         self.chunk = np.empty(self.fs, np.complex64)
         self.periodogram = Periodogram(rate)
         self.overload = OverloadMonitor()
+        self.worker = AnalysisWorker(rate)
+        self.analyses_skipped = 0
+        self.harmonics_found = 0
 
         # The window starts PRETRIGGER_SECONDS before the detector fired, so it
         # has to be that much longer to still contain ANALYZE_SECONDS of signal.
@@ -1955,6 +2090,8 @@ class CaptureLoop:
                 print(f"  ** OVERLOAD ({why}) — add attenuation "
                       f"[clip {clip_frac*100:.2f}%]", file=sys.stderr)
 
+        self._collect()
+
         stepped = self.det.step(power_db, frame_start)
         if stepped is None:
             return
@@ -2009,37 +2146,92 @@ class CaptureLoop:
 
     # -- analysis ------------------------------------------------------------
 
-    def _analyse(self, ch, nsamples):
-        """Analyse one channel, record the result, and say so on the console.
+    def _harmonic_parent(self, ch):
+        """Is this channel an odd harmonic of a stronger concurrent event?
 
-        Removes ch from `pending` either way — one analysis per event.
+        A strong signal at baseband offset f from the tuned centre makes the
+        receiver produce products at odd multiples of f — measured as exactly
+        -3f, +5f, -7f, +9f, -11f on 2026-08-27. Because the channel grid is
+        uniform, the test is integer arithmetic on channel indices and needs no
+        tolerance at all.
+
+        Three conditions, all required. The offsets must be in an odd-integer
+        ratio of at least 3; the candidate parent must be **stronger**, since a
+        product is never louder than what made it; and both must be on the air
+        at once, because a harmonic cannot outlive its cause.
+
+        Deliberately conservative. A real transmitter can sit at an odd-harmonic
+        offset by coincidence, so this only ever runs while a stronger signal is
+        actually transmitting, and the result is recorded rather than discarded.
         """
-        t0 = time.perf_counter()
-        result = self._measure(ch, nsamples)
-        self.analyze_ms += (time.perf_counter() - t0) * 1000.0
-        if result is None:
-            return
-        self.analyses += 1
-        freq_hz = self.det.grid.freqs_hz[ch]
-        row = self.log.analysed(ch, result, freq_hz)
-        if self.store is not None and row is not None:
-            self.log.attach_capture(row, *self.store.write(row,
-                                                           result["signals"]))
-        self._report(ch, result)
+        centre_ch = int(round(self.det.center / CHANNEL_HZ))
+        mine = int(round(self.det.grid.freqs_hz[ch] / CHANNEL_HZ)) - centre_ch
+        if mine == 0:
+            return None, None
+        my_snr = float(self.det.tracker.peak_snr[ch])
+        best = (None, None, 0.0)
+        for other in self.log.open_rows:
+            if other == ch:
+                continue
+            theirs = int(round(self.det.grid.freqs_hz[other] / CHANNEL_HZ)) - centre_ch
+            if theirs == 0 or mine % theirs != 0:
+                continue
+            n = mine // theirs
+            if abs(n) < 3 or n % 2 == 0:
+                continue
+            snr = float(self.det.tracker.peak_snr[other])
+            if snr <= my_snr or snr <= best[2]:
+                continue
+            best = (self.log.open_rows[other], n, snr)
+        return best[0], best[1]
 
-    def _measure(self, ch, nsamples):
+    def _analyse(self, ch, nsamples):
+        """Hand one channel's IQ to the analysis worker.
+
+        Removes ch from `pending` either way — one analysis per event. The IQ is
+        lifted off the ring here, on the reader thread, because `Ring.get`
+        returns a copy and the worker must never touch the buffer the reader is
+        still writing into.
+        """
         start = self.pending.pop(ch, None)
-        if (start is None or ch not in self.log.open_rows
+        row = self.log.open_rows.get(ch)
+        if (start is None or row is None
                 or nsamples < self.min_analyze_samples):
-            return None
+            return
+        parent, n = self._harmonic_parent(ch)
+        if parent is not None:
+            # Not analysed on purpose. The result would be the parent's, which
+            # is exactly what makes these rows dangerous — they inherit its tone
+            # at full confidence. Recording the parent instead is both honest
+            # and free, and it takes a ~90 ms analysis off the reader.
+            self.log.mark_harmonic(row, parent, n)
+            self.harmonics_found += 1
+            return
+
         iq = self.ring.get(start, int(nsamples))
         if iq is None:
-            return None
-        return analyze_analog(iq, self.rate,
-                              self.det.grid.freqs_hz[ch] - self.det.center,
-                              keep_signals=self.store is not None)
+            return
+        if not self.worker.submit(ch, row, iq,
+                                  self.det.grid.freqs_hz[ch] - self.det.center,
+                                  self.det.grid.freqs_hz[ch],
+                                  float(self.det.tracker.peak_snr[ch]),
+                                  self.store is not None):
+            self.analyses_skipped += 1
 
-    def _report(self, ch, result):
+    def _collect(self):
+        """Apply whatever the worker has finished. Reader thread only."""
+        for ch, row, result, freq_hz, snr_db, ms in self.worker.drain():
+            self.analyze_ms += ms
+            if result is None:
+                continue
+            self.analyses += 1
+            self.log.apply(row, result, freq_hz)
+            if self.store is not None:
+                self.log.attach_capture(row, *self.store.write(
+                    row, result["signals"]))
+            self._report(freq_hz, snr_db, result)
+
+    def _report(self, freq_hz, snr_db, result):
         if result["dcs_code"] is not None:
             tone = (f"DCS {result['dcs_code']:03d}{result['dcs_polarity']}"
                     f" ({result['dcs_errors']} bit err)")
@@ -2051,8 +2243,8 @@ class CaptureLoop:
             tone = "no tone"
         else:
             tone = "tone not checked"
-        print(f"  {self.det.grid.freqs_hz[ch]/1e6:10.4f} MHz  "
-              f"snr {self.det.tracker.peak_snr[ch]:5.1f} dB  "
+        print(f"  {freq_hz/1e6:10.4f} MHz  "
+              f"snr {snr_db:5.1f} dB  "
               f"dev {result['deviation_hz']:6.0f} Hz  "
               f"[{result['analyzed_s']:.2f}s]  {tone}")
 
@@ -2067,13 +2259,15 @@ class CaptureLoop:
         a_ms = self.analyze_ms / max(1, self.analyses)
         uptime_h = (time.time() - self.session_start) / 3600.0
         active = int((self.det.tracker.state == EventTracker.ACTIVE).sum())
+        harm = f" +{self.harmonics_found} harm" if self.harmonics_found else ""
         print(f"[stats] {fps:5.1f} fps (target {self.rate/self.fs:.0f})   "
               f"overflow {self.overflows}   active {active}   "
-              f"events {self.events_logged} "
+              f"events {self.events_logged}{harm} "
               f"({self.events_logged/max(uptime_h, 1/60):.0f}/hr)")
         print(f"        detect {d_ms:5.2f} ms/frame ({d_ms*fps/10:4.1f}% core)   "
               f"floor {self.det.floor.last_cost_ms:5.2f} ms/{FLOOR_EVERY} frames"
-              f"   analyse {a_ms:6.1f} ms x{self.analyses}")
+              f"   analyse {a_ms:6.1f} ms x{self.analyses}"
+              + (f"  SKIPPED {self.worker.skipped}" if self.worker.skipped else ""))
         print(f"        clip {self.overload.clip_frames}   "
               f"desense {self.overload.desense_frames}")
         self.detect_ms = self.analyze_ms = 0.0
@@ -2091,6 +2285,13 @@ class CaptureLoop:
         receiver. run_receivers still carries the radio, its serial and the rate;
         runs carries the span.
         """
+        # Retire the worker before closing anything it writes through. Queued
+        # analyses are finished and applied rather than discarded: they belong
+        # to events already in the database, and dropping them would leave rows
+        # that look like they were never worth analysing.
+        self.worker.stop()
+        self._collect()
+
         self.close_window()
         db.end_run(self.conn, self.run_id)
         self.conn.close()
@@ -2098,8 +2299,23 @@ class CaptureLoop:
 
         print(f"\nstopped. overflows: {self.overflows}  "
               f"events: {self.events_logged}  "
+              f"analysed: {self.analyses}  "
+              f"skipped: {self.worker.skipped}  "
+              f"harmonics: {self.harmonics_found}  "
               f"clip frames: {self.overload.clip_frames}  "
               f"desense frames: {self.overload.desense_frames}")
+        if self.harmonics_found:
+            print(f"{self.harmonics_found} events were receiver products of a "
+                  f"stronger signal — odd harmonics of its offset from the "
+                  f"tuned centre.\n  They are recorded with `harmonic_of` "
+                  f"pointing at the parent and excluded from `channels`; they "
+                  f"were not analysed,\n  because the answer would have been "
+                  f"the parent's.")
+        if self.worker.skipped:
+            print(f"{self.worker.skipped} analyses were skipped because the "
+                  f"worker was still busy. Those events are logged and timed "
+                  f"but stay at tier 0.\n  Skipping analysis loses one row's "
+                  f"detail; skipping reads would corrupt the whole window.")
         if self.store is not None:
             print(f"retained {self.store.count} captures, "
                   f"{self.store.written/1e6:.1f} MB"
@@ -2111,12 +2327,12 @@ class CaptureLoop:
                   "'dmesg | grep -i voltage'.")
         if self.overload.clip_frames or self.overload.desense_frames:
             print("Front end was overloaded. Affected events are flagged in the "
-              "`overload` column.\n  Attenuation is measured per band, not "
-              "assumed — see docs/phase_log.md Phase 1. Note that overload can "
-              "also\n  come from too much GAIN: dropping 42 -> 30 cut spur "
-              "products by 41 dB on 2026-08-27."
-                  "`overload` column. Add attenuation — 20 dB is the default and "
-                  "costs no usable sensitivity at festival distances.")
+                  "`overload` column.\n"
+                  "  Attenuation is measured per band, not assumed — see "
+                  "docs/phase_log.md Phase 1.\n"
+                  "  Overload can also come from too much GAIN: dropping 42 to "
+                  "30 cut spur products by 41 dB\n"
+                  "  on 2026-08-27, and the carrier read stronger afterwards.")
 
 
 def run(args):

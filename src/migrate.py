@@ -356,6 +356,35 @@ MIGRATIONS: dict[int, list[str]] = {
            ORDER BY w.receiver_id, w.center_hz""",
     ],
 
+    10: [
+        # Events the receiver manufactured from a stronger one.
+        #
+        # Measured 2026-08-27: a handheld reading 64.8 dB SNR produced 124 events
+        # across the whole 2.49 MHz window. What survives at sane gain is a comb
+        # at ODD harmonics of the carrier's baseband offset from the tuned
+        # centre — verified as exact integers -3, +5, -7, +9, -11, which is why
+        # the comb spacing changed from 150 kHz to 450 kHz when the transmitter
+        # moved from a channel 37.5 kHz below centre to one 112.5 kHz above it.
+        #
+        # These are the dangerous ones. Being harmonics of a real transmission
+        # they inherit its properties: they carried its CTCSS tone at capture
+        # ratio 1.0 and matched its duration to 14 ms. `overload` does not catch
+        # them, because OverloadMonitor watches for a broadband lift and these
+        # are discrete products. Every field the deck records says they are real
+        # traffic on channels nobody keyed.
+        #
+        # Recorded rather than dropped. The discriminator is strong but has not
+        # been checked against a season of real data, and a real transmitter can
+        # sit at an odd-harmonic offset by coincidence — 462.2625 is somebody's
+        # licensed frequency. An auditable row is worth the storage; a deletion
+        # that turns out to be wrong is not recoverable. The enricher excludes
+        # them from `channels`, so nothing operator-facing shows them.
+        "ALTER TABLE events ADD COLUMN harmonic_of INTEGER "
+        "REFERENCES events(id) ON DELETE SET NULL",
+        "ALTER TABLE events ADD COLUMN harmonic_n INTEGER",
+        "CREATE INDEX idx_events_harmonic ON events (harmonic_of)",
+    ],
+
     8: [
         # Which window heard this event, as a fact rather than an inference.
         #

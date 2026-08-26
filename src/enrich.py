@@ -91,8 +91,17 @@ DEV_MIN_SNR_DB = 18.0
 # Pass 1: tag events against the band plan
 # ---------------------------------------------------------------------------
 
+# Receiver products are excluded from every derived table. They are real rows
+# in `events` — measured frequency, timing and SNR, and a pointer to the
+# transmission that produced them — but they are not traffic, and rolling them
+# into `channels` would invent a channel nobody used and hand it a tone copied
+# from somewhere else. Migration 10 and handoff section 10 carry the reasoning.
+NOT_HARMONIC = "harmonic_of IS NULL"
+
+
 def tag(conn: sqlite3.Connection, retag: bool = False) -> int:
-    where = "" if retag else "WHERE band_plan_id IS NULL"
+    where = (f"WHERE {NOT_HARMONIC}" if retag
+             else f"WHERE band_plan_id IS NULL AND {NOT_HARMONIC}")
     rows = conn.execute(f"SELECT id, freq_hz FROM events {where}").fetchall()
 
     updates = []
@@ -209,7 +218,7 @@ def rollup(conn: sqlite3.Connection, min_agreement: float = 0.8) -> int:
     buckets: dict[int, list[sqlite3.Row]] = {}
     plans: dict[int, list] = {}
     cache: dict[int, tuple] = {}
-    for e in conn.execute("SELECT * FROM events"):
+    for e in conn.execute(f"SELECT * FROM events WHERE {NOT_HARMONIC}"):
         key, tied = _channel_key(conn, e["freq_hz"], cache)
         buckets.setdefault(key, []).append(e)
         # Keep the most specific match anything in this bucket produced, not
@@ -366,7 +375,9 @@ def pair(conn: sqlite3.Connection) -> int:
 
     chans = {c["freq_hz"]: c for c in conn.execute("SELECT * FROM channels")}
     events: dict[int, list[sqlite3.Row]] = {}
-    for e in conn.execute("SELECT * FROM events WHERE channel_id IS NOT NULL"):
+    for e in conn.execute(
+            f"SELECT * FROM events WHERE channel_id IS NOT NULL "
+            f"AND {NOT_HARMONIC}"):
         events.setdefault(e["channel_id"], []).append(e)
 
     found = []
