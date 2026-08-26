@@ -9,11 +9,16 @@ plugging one in found; `docs/phase_log.md` has the measurements and section 10 h
 left to do.
 
 **Be precise about what has and has not met a real signal.** `--spectrum` has, extensively,
-and six faults came out of it. **The capture loop has not** — the detector, `EventTracker`,
-the two-phase write, tone and DCS decoding, the tier ladder and repeater pairing have only
-ever run against `simradio`, because `spectrum_capture` is a completely separate path that
-writes no events. Treat every threshold in this repository as a guess until Phases 2
-through 4 say otherwise.
+and six faults came out of it. **The capture loop has, as of 2026-08-27** — detection,
+event boundaries and CTCSS decoding are all confirmed against a real transmitter, and two
+blockers came out of it, in section 10.
+
+Still untouched by a real signal: **DCS decoding, the tier ladder, `enrich.pair()` and the
+scoring path**. Those have only ever run against `simradio`, and the DCS module's history
+in section 5 is a warning about how convincingly a decoder can be wrong while passing
+every check it can run on itself.
+
+Treat every threshold in this repository as a guess until Phases 3 and 4 say otherwise.
 
 ---
 
@@ -864,18 +869,44 @@ quickly.
 Ordered by what it needs rather than by phase number, because the blocking constraint is
 usually a part in the post rather than a gate.
 
-### The largest untested surface, and it needs nothing
+### The capture loop has now met a real signal — see `docs/phase_log.md` Phase 2
 
-**The capture loop has still never seen a real signal.** Everything in sections 8 and 9
-went through `--spectrum`, which is a separate path — `spectrum_capture` does not go
-through `Radio`, does not use `Detector`, `EventTracker`, `EventLog` or `analyze_analog`,
-and writes no events. The detector, the two-phase write, tone and DCS decoding, the tier
-ladder and repeater pairing have only ever run against `simradio`.
+Opened 2026-08-27. Detection and logging work: correct frequencies, correct event
+boundaries, CTCSS decoded off the air at capture ratio 1.0, and short transmissions
+correctly refused a tone rather than given a made-up one. Two blockers stand between that
+and Gate 2, and both belong on this list rather than buried in the phase log.
 
-`--spectrum` was in exactly that position on the morning of 2026-08-25 and turned out to
-have six faults in it, three of which no amount of running without hardware could have
-found. The capture loop is a much larger body of code. **Phase 2 is the priority and it
-requires only the antenna and a handheld.**
+**The loop saturates one core at 10 MSPS.** 95-98% of a core, single-threaded, achieving
+124 reads/sec where real time needs 152.6 — and the 19% shortfall is the overflow.
+Gate 2's CPU check reads 24.6% "across four cores" and passes while the binding resource
+is pinned, so the gate measures the wrong thing. 10 MSPS is not negotiable: repeater
+pairing needs 462.x and 467.x heard together, 5 MHz apart. Moving analysis off the read
+thread is the obvious candidate, since one 78 ms `analyze_analog` blocks twelve reads.
+
+**Strong signals manufacture phantom events that every recorded field says are real.** A
+handheld at 10 feet produced 124 phantoms across the whole span. Most were broadband
+desense and were correctly flagged `overload`; what survives at lower gain is worse. They
+are odd harmonics of the carrier's baseband offset from the tuned centre — exact odd
+integers, verified — so they inherit the parent's CTCSS tone at full confidence, match its
+duration to 14 ms, and are **not** flagged, because `OverloadMonitor` watches for a
+broadband lift and these are discrete products.
+
+The discriminator exists and is not yet implemented: a phantom's `freq_raw_hz - freq_hz`
+is exactly N times its parent's, because the harmonic multiplies the offset error along
+with the offset. A real transmitter's frequency error has no relationship to its distance
+from the deck's tuned centre. What to *do* with such an event — drop it, flag it, or
+record the parent it derives from — is a design decision, not a coding one.
+
+Also note **the linearity check from section 9 cannot see this**. It runs once when a
+window opens, so compression caused by an intermittent strong signal is invisible to it;
+it reported `linear` for the window in which all 124 phantoms appeared, and was right at
+the moment it looked.
+
+### The next largest untested surface
+
+**Tone and DCS decoding beyond two tones, the tier ladder, and repeater pairing.** Two CTCSS tones have now been decoded off the air, but the DCS decoder, the
+tier ladder, `enrich.pair()` and the whole scoring path have still only ever run against
+`simradio`. Phase 3 needs nothing that is not already on the bench.
 
 ### Then, still with nothing new to buy
 

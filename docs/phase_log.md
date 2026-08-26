@@ -10,7 +10,7 @@ two had drifted into describing different plans.
 |---|---|---|---|
 | **0** — Pi alone, no radio | **PASS** | 2026-08-18 | 28.8% of one core, 27 concurrent, peak 71.6 °C, zero throttling, fan confirmed |
 | **1** — first radio, first signal | in progress | 2026-08-26 | radio 1 up; 7/7 FRS channels; ppm closed at −0.64 on three references; antenna steps outstanding |
-| **2** — detection and logging | — | — | the capture loop has still never seen a real signal |
+| **2** — detection and logging | in progress | 2026-08-27 | detection and logging work; blocked on single-core saturation at 10 MSPS and phantom harmonics |
 | **3** — tones | — | — | |
 | **4** — leave it running | — | — | 24 h, one radio; where detection thresholds get tuned |
 | **5** — digital | — | — | DMR must not be mistaken for analog |
@@ -301,3 +301,120 @@ FROM events WHERE freq_hz = <the known transmitter> AND freq_raw_hz IS NOT NULL;
 That query is still untested against hardware — it needs the **capture loop**, and
 everything above came from `--spectrum`, which is a separate path. Running the capture
 loop against a real radio is the first thing Phase 2 does.
+
+---
+
+## Phase 2 — in progress, opened 2026-08-27
+
+**The capture loop met a real signal for the first time.** Everything before this was
+`--spectrum`, which shares no code with it.
+
+Run parked on one window with `--freq`, chain
+`antenna -> Flamingo -> 10 dB -> 10 dB -> Airspy`, Nagoya NA-701 indoors, Boston metro.
+
+### What works
+
+| Test | Result |
+|---|---|
+| Events on the right frequency | **PASS** — 462.7125 logged with -75 Hz error, 0.16 ppm residual |
+| Five presses ~2 s apart | **PASS** — five events, gaps 2.5-3.0 s |
+| Five fast presses | **PASS** — one event, not five; `hang_s` merges correctly |
+| Short stab | **PASS** — 0.38 s caught |
+| Long transmission | **PASS** — tracks to 67.9 s; the old 1.27 s truncation is gone |
+| CTCSS on live RF | **PASS** — 74.4 Hz and 110.9 Hz both decoded at capture ratio 1.0 |
+| Tone declined when dwell too short | **PASS** — 0.38 s and 0.64 s events report `unknown` rather than inventing one |
+| Temperature | **PASS** — 56.2 C |
+
+The tone decodes are the first this project has done against a real transmitter, and
+110.9 Hz was chosen deliberately: it is one of the two tones the DCS decoder used to
+misread as a codeword before the capture-ratio ordering fix in handoff section 5.
+
+### Blocker 1 — the loop saturates one core at 10 MSPS
+
+```
+                       2.5 MSPS      10 MSPS
+detect per frame        1.34 ms       2.65 ms
+analyse per event         33 ms         78 ms
+achieved / required fps  76.3 / 76   124 / 152.6
+overflows                      0        45-64
+```
+
+`readStream` returns 65536 samples, so real time at 10 MSPS needs 152.6 reads/sec and the
+loop manages 124 — about 19% short, and that shortfall is the overflow. Measured at
+**95-98% of one core**, and the loop is single-threaded, so the other three do not help.
+Gate 2's "CPU across four cores under 40%" reads 24.6% and passes while the binding
+resource is saturated; the gate is measuring the wrong thing.
+
+There is a feedback loop in it: overflows drop samples, so signals appear to stop, so
+events fragment, so more events need the 78 ms analysis, which blocks the reader further.
+
+**10 MSPS is not optional.** Repeater pairing needs 462.x and 467.x heard together, 5 MHz
+apart, which a 2.5 MSPS span cannot do. Phase 2 was run at 2.5 MSPS because every check in
+the gate is valid there, but the throughput problem has to be solved before deployment.
+The obvious candidate is moving analysis off the read thread.
+
+### Blocker 2 — strong signals manufacture phantom events that look real
+
+A handheld at 10 feet reading 64.8 dB SNR produced **124 phantom events on 124 channels**,
+spanning the entire 2.49 MHz window, all starting within a millisecond of the real one.
+At gain 42 they were broadband desense and were correctly flagged `overload`.
+
+Dropping gain 42 -> 30 removed 12 dB of **VGA**, which sits after the mixer:
+
+| offset | gain 42 | gain 30 |
+|---|---|---|
+| carrier | 64.8 dB | 67.3 dB |
+| +150 kHz | 57.0 (-7.8 dBc) | 18.3 (-49.1 dBc) |
+| phantom channels | 127 | 11 |
+
+**41 dB of spur improvement for 12 dB less gain** — far more than 1:1, so the products are
+generated at or after the VGA, converter-side. The carrier read *stronger* at the lower
+gain, because compression had been flattening it too.
+
+The remaining products are odd harmonics of the carrier's **baseband offset from the tuned
+centre**. Measured with the carrier 112.5 kHz above centre:
+
+```
+  observed      offset    N        freq err   err/N
+  462.7125    +112.5k    +1.00       -75 Hz     -75
+  462.2625    -337.5k    -3.00      +227 Hz     -76
+  463.1625    +562.5k    +5.00      -378 Hz     -76
+  461.8125    -787.5k    -7.00      +529 Hz     -76
+  463.6125   +1012.5k    +9.00      -680 Hz     -76
+  461.3625   -1237.5k   -11.00      +840 Hz     -76
+```
+
+Exact odd integers. It is why the comb spacing changed from 150 kHz to 450 kHz when the
+transmitter moved from channel 1 to channel 7 — the baseband offset went from -37.5 to
++112.5 kHz.
+
+**These are the dangerous ones.** Being harmonics of a real signal they inherit its
+properties: they carried CTCSS 110.9 Hz at capture ratio 1.0, matched its duration to
+14 ms, and were **not** flagged `overload`, because they are discrete products rather than
+the broadband lift `OverloadMonitor` watches for. Every field the deck records makes them
+look like genuine traffic on channels nobody keyed.
+
+**They are detectable.** `freq_raw_hz - freq_hz` is exactly N times the parent's, because
+the harmonic multiplies the offset error along with the offset. A real transmitter's
+frequency error bears no relation to how far it happens to sit from the deck's tuned
+centre. Not yet implemented; it needs a design decision about whether to drop such events,
+flag them, or record the parent they derive from.
+
+### Also found
+
+- **stdout was block-buffered.** A 45 s run that logged 124 events to the database emitted
+  none of them to its log file: Python block-buffers stdout when it is not a terminal, and
+  `timeout` sends SIGTERM, so the buffer died with the process. journald is a pipe too, so
+  the deployed deck had the same hole. Now line-buffered.
+- **The linearity check cannot see this.** It runs once when a window opens, against
+  whatever is on the air at that moment, so compression caused by an intermittent strong
+  signal is invisible to it. It reported `linear` for the window in which all 124 phantoms
+  appeared, and it was right at the time it looked.
+- **The overload hint recommended 20 dB** as costing "no usable sensitivity", which Phase 1
+  measured as wrong — 20 dB leaves the antenna-versus-dummy delta at 0.7 dB. Corrected.
+
+### Outstanding for Gate 2
+
+- [ ] Zero overflows for an hour at 10 MSPS — needs the threading or optimisation work
+- [ ] Phantom harmonics distinguished from real events
+- [ ] An hour-long clean run, which neither of the above allows yet

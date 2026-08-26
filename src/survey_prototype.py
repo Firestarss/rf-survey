@@ -2111,6 +2111,10 @@ class CaptureLoop:
                   "'dmesg | grep -i voltage'.")
         if self.overload.clip_frames or self.overload.desense_frames:
             print("Front end was overloaded. Affected events are flagged in the "
+              "`overload` column.\n  Attenuation is measured per band, not "
+              "assumed — see docs/phase_log.md Phase 1. Note that overload can "
+              "also\n  come from too much GAIN: dropping 42 -> 30 cut spur "
+              "products by 41 dB on 2026-08-27."
                   "`overload` column. Add attenuation — 20 dB is the default and "
                   "costs no usable sensitivity at festival distances.")
 
@@ -2167,6 +2171,18 @@ def run(args):
 
 
 def main():
+    # Line-buffer stdout. When it is not a terminal — under systemd, or any
+    # redirect — Python block-buffers it, so a run that is killed rather than
+    # stopped loses everything still in the buffer. Measured on 2026-08-27: a
+    # 45 s capture that logged 124 events to the database emitted not one of
+    # them to its log file, because `timeout` sends SIGTERM and the buffer went
+    # with the process. journald is a pipe too, so the deployed deck had the
+    # same hole.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except AttributeError:
+        pass
+
     p = argparse.ArgumentParser(description="RF survey deck bench prototype")
     p.add_argument("--selftest", action="store_true",
                    help="check and benchmark without any radio attached")
