@@ -95,6 +95,23 @@ strong signal is an obstruction, not a range limit, and the tool calls those out
 separately with their bearings so you can compare them against the paths that
 worked.
 
+#### Codes past 38 are DCS, and the numbering is the manufacturer's
+
+Handhelds present one continuous list of "privacy codes", but it is two schemes
+end to end: **1–38 are CTCSS tones**, and **39 upward are DCS codewords**. Where
+the DCS part starts is standard; the order it runs in is not, and it varies by
+manufacturer. So above 38, do not record the position in the menu — **record the
+DCS number the radio displays** (023, 025, 026 …) and put it in a `dcs` column:
+
+```
+code,dcs,lat,lon,label
+30,,42.1,-71.1,still CTCSS at code 30
+,023,42.2,-71.2,DCS from here on
+```
+
+The tool keeps CTCSS and DCS in separate namespaces, so DCS 023 and privacy code
+23 can both appear in one survey without colliding.
+
 **Use `code`, not raw Hz, unless you are sure.** The tool carries its own 38-entry
 privacy-code table. `survey_prototype.CTCSS_TONES` has 54 tones — every one the
 decoder can identify, including several the 38-code scheme skips — so indexing

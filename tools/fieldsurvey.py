@@ -70,6 +70,29 @@ def code_for_tone(hz):
     return None
 
 
+# A transmission is identified by whichever subaudible signalling it carried.
+# Radios offer both and number them in one continuous list, so a walk can mix
+# them freely — which is why this is a key rather than a tone.
+
+def key_of_row(row):
+    """('ctcss', 136.5) or ('dcs', 23), or None if the event carried neither."""
+    if row["dcs_code"] is not None:
+        return ("dcs", int(row["dcs_code"]))
+    if row["ctcss_hz"] is not None:
+        return ("ctcss", round(float(row["ctcss_hz"]), 1))
+    return None
+
+
+def describe(key, polarity=None):
+    if key is None:
+        return "--"
+    kind, val = key
+    if kind == "dcs":
+        return f"DCS {val:03d}{polarity or ''}"
+    code = code_for_tone(val)
+    return f"CTCSS {val:.1f}" + (f" (code {code})" if code else "")
+
+
 # --- geometry --------------------------------------------------------------
 
 EARTH_M = 6371000.0
@@ -108,8 +131,8 @@ def open_db(path):
 def heard(conn, freq_hz, since_min=None):
     """Every analysed event on one channel, strongest first per tone."""
     sql = ["SELECT freq_hz, t_start, duration_s, snr_db, ctcss_hz, confidence,"
-           "       deviation_hz, harmonic_of"
-           "  FROM events WHERE ctcss_hz IS NOT NULL"]
+           "       deviation_hz, harmonic_of, dcs_code, dcs_polarity"
+           "  FROM events WHERE (ctcss_hz IS NOT NULL OR dcs_code IS NOT NULL)"]
     args = []
     if freq_hz is not None:
         sql.append("AND freq_hz = ?")
@@ -132,16 +155,15 @@ def cmd_list(args):
         print("\nIf you were transmitting, the deck did not hear you. That is a")
         print("result, not a fault — note the location and keep walking.")
         return 0
-    print(f"{'time':>10} {'MHz':>11} {'code':>5} {'CTCSS':>7} "
+    print(f"{'time':>10} {'MHz':>11} {'signalling':>20} "
           f"{'dur':>7} {'SNR':>7} {'cap':>5}")
-    print("-" * 60)
+    print("-" * 68)
     for r in rows:
         ts = datetime.datetime.fromtimestamp(
             r["t_start"], datetime.timezone.utc).strftime("%H:%M:%S")
-        code = code_for_tone(r["ctcss_hz"])
         flag = "  (receiver product)" if r["harmonic_of"] else ""
         print(f"{ts:>10} {r['freq_hz']/1e6:11.4f} "
-              f"{code if code else '--':>5} {r['ctcss_hz']:7.1f} "
+              f"{describe(key_of_row(r), r['dcs_polarity']):>20} "
               f"{r['duration_s'] or 0:6.2f}s {r['snr_db'] or 0:6.1f} "
               f"{r['confidence'] or 0:5.2f}{flag}")
     print(f"\n{len(rows)} transmissions identified by tone.")
@@ -154,15 +176,19 @@ def read_points(path):
         for row in csv.DictReader(fh):
             row = {(k or "").strip().lower(): (v or "").strip()
                    for k, v in row.items()}
-            if row.get("ctcss"):
-                tone = float(row["ctcss"])
-                code = code_for_tone(tone)
+            if row.get("dcs"):
+                key = ("dcs", int(str(row["dcs"]).lstrip("0") or "0"))
+                shown = f"DCS {key[1]:03d}"
+            elif row.get("ctcss"):
+                key = ("ctcss", round(float(row["ctcss"]), 1))
+                shown = describe(key)
             elif row.get("code"):
-                code = int(row["code"])
-                tone = tone_for_code(code)
+                key = ("ctcss", round(tone_for_code(int(row["code"])), 1))
+                shown = describe(key)
             else:
-                raise SystemExit("points file needs a 'code' or 'ctcss' column")
-            out.append(dict(code=code, tone=tone,
+                raise SystemExit(
+                    "points file needs a 'code', 'ctcss' or 'dcs' column")
+            out.append(dict(key=key, shown=shown,
                             lat=float(row["lat"]), lon=float(row["lon"]),
                             label=row.get("label", "")))
     if not out:
@@ -196,12 +222,14 @@ def cmd_fit(args):
     for r in rows:
         if r["harmonic_of"]:
             continue           # a receiver product is not a propagation sample
-        t = round(r["ctcss_hz"], 1)
-        if r["snr_db"] is not None and r["snr_db"] > best.get(t, (-999,))[0]:
-            best[t] = (r["snr_db"], r)
+        k = key_of_row(r)
+        if k is None or r["snr_db"] is None:
+            continue
+        if r["snr_db"] > best.get(k, (-999,))[0]:
+            best[k] = (r["snr_db"], r)
 
     for p in points:
-        got = best.get(round(p["tone"], 1))
+        got = best.get(p["key"])
         p["snr"] = got[0] if got else None
         p["dist"] = distance_m(rx, (p["lat"], p["lon"]))
         p["brg"] = bearing_deg(rx, (p["lat"], p["lon"]))
@@ -216,17 +244,17 @@ def cmd_fit(args):
     print(f"receiver at {rx[0]:.6f}, {rx[1]:.6f}"
           + (f"   {args.freq/1e6:.4f} MHz" if args.freq else ""))
     print(f"{len(got)} of {len(points)} points heard\n")
-    print(f"{'code':>5} {'CTCSS':>7} {'dist':>8} {'bearing':>9} "
+    print(f"{'signalling':>20} {'dist':>8} {'bearing':>9} "
           f"{'SNR':>8} {'model':>8} {'resid':>8}  label")
-    print("-" * 78)
+    print("-" * 88)
     for p in sorted(points, key=lambda q: q["dist"]):
         pred = inter + slope * math.log10(p["dist"])
         brg = f"{p['brg']:5.0f} {compass(p['brg']):<2}"
         if p["snr"] is None:
-            print(f"{p['code'] or '--':>5} {p['tone']:7.1f} {p['dist']:7.0f}m "
+            print(f"{p['shown']:>20} {p['dist']:7.0f}m "
                   f"{brg:>9} {'NOT HEARD':>8} {pred:7.1f} {'':>8}  {p['label']}")
         else:
-            print(f"{p['code'] or '--':>5} {p['tone']:7.1f} {p['dist']:7.0f}m "
+            print(f"{p['shown']:>20} {p['dist']:7.0f}m "
                   f"{brg:>9} {p['snr']:7.1f} {pred:7.1f} "
                   f"{p['snr']-pred:+7.1f}  {p['label']}")
 

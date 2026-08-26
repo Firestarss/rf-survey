@@ -55,6 +55,66 @@ class PrivacyCodes(unittest.TestCase):
                 fs.tone_for_code(bad)
 
 
+class Signalling(unittest.TestCase):
+    """A walk can mix CTCSS and DCS, so points are keyed, not toned."""
+
+    def row(self, **kw):
+        base = dict(ctcss_hz=None, dcs_code=None, dcs_polarity=None)
+        base.update(kw)
+        return base
+
+    def test_ctcss_and_dcs_produce_distinct_keys(self):
+        self.assertEqual(fs.key_of_row(self.row(ctcss_hz=136.5)),
+                         ("ctcss", 136.5))
+        self.assertEqual(fs.key_of_row(self.row(dcs_code=23,
+                                                dcs_polarity="N")),
+                         ("dcs", 23))
+
+    def test_dcs_wins_when_both_are_somehow_present(self):
+        """A decoded codeword is a stronger claim than a tone estimate."""
+        self.assertEqual(
+            fs.key_of_row(self.row(ctcss_hz=136.5, dcs_code=23)), ("dcs", 23))
+
+    def test_an_event_with_neither_has_no_key(self):
+        self.assertIsNone(fs.key_of_row(self.row()))
+
+    def test_dcs_23_and_ctcss_23_never_collide(self):
+        """DCS 023 and the 23rd privacy code are different transmissions."""
+        self.assertNotEqual(fs.key_of_row(self.row(dcs_code=23)),
+                            fs.key_of_row(self.row(ctcss_hz=fs.tone_for_code(23))))
+
+    def test_descriptions_are_unambiguous(self):
+        self.assertIn("code 21", fs.describe(("ctcss", 136.5)))
+        self.assertEqual(fs.describe(("dcs", 23), "N"), "DCS 023N")
+        self.assertEqual(fs.describe(("dcs", 23), "I"), "DCS 023I")
+
+
+class PointsFile(support.TempDirCase):
+
+    def write(self, body):
+        path = self.path("p.csv")
+        pathlib.Path(path).write_text(body)
+        return path
+
+    def test_accepts_code_ctcss_and_dcs_columns(self):
+        pts = fs.read_points(self.write(
+            "code,ctcss,dcs,lat,lon,label\n"
+            "21,,,42.1,-71.1,by code\n"
+            ",146.2,,42.2,-71.2,by tone\n"
+            ",,023,42.3,-71.3,by dcs\n"))
+        self.assertEqual([p["key"] for p in pts],
+                         [("ctcss", 136.5), ("ctcss", 146.2), ("dcs", 23)])
+
+    def test_leading_zeros_on_dcs_are_not_octal(self):
+        """DCS 023 is the digits, read as a decimal 23 — not 0o23 = 19."""
+        pts = fs.read_points(self.write("dcs,lat,lon\n023,42.1,-71.1\n"))
+        self.assertEqual(pts[0]["key"], ("dcs", 23))
+
+    def test_a_row_identifying_nothing_is_refused(self):
+        with self.assertRaises(SystemExit):
+            fs.read_points(self.write("lat,lon\n42.1,-71.1\n"))
+
+
 class Geometry(unittest.TestCase):
 
     def test_distance_against_a_known_pair(self):
