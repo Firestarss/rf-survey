@@ -23,9 +23,23 @@ receivers:
     mode: parked
     center_hz: 466_000_000        # covers 461–471: all FRS, GMRS, UHF dots and stars
     sample_rate: 10_000_000
-    gain: 12                      # TODO Phase 1: set from measured noise floor sweep
-    ppm: 0.0                      # TODO Phase 1: measure against a known reference
-    attenuator_db: 20             # physically fitted, not software-controlled
+    # STILL PROVISIONAL and known to be too low — step 11 sets it, and step 11
+    # needs the antenna. Measured 2026-08-26: this is an overall 0-45 dB filling
+    # LNA, then MIX, then VGA, and the receiver is ADC-noise-limited below ~36,
+    # so 12 is LNA-only and the least sensitive useful setting there is. A
+    # handheld ten feet away read 9.6 dB SNR here and 48.6 dB at gain 42.
+    gain: 12
+    # Measured Phase 1, 2026-08-26, against three independent references: an FRS
+    # handheld across all 7 channels (-0.644), a licensed transmitter on exactly
+    # 464.000000 MHz (-0.65), and a tinySA Ultra generator (-0.41, the outlier —
+    # its own output is +0.21 ppm high, which is why three references and not one).
+    # Sign: POSITIVE means signals read low by this much, and this value corrects
+    # them. Verified on hardware — +0.64 moves a known carrier to within 96 Hz,
+    # -0.64 doubles the error to -576 Hz.
+    # Applied to the tune request, not via setFrequencyCorrection: SoapyAirspy
+    # reports hasFrequencyCorrection() == False and silently ignores it.
+    ppm: 0.64
+    attenuator_db: 20             # 2x 10 dB stacked until the 20 dB pads arrive
     antenna: null                 # TODO: record what is actually screwed on
     usb_bus: 4                    # Bus 004 Port 1, xhci-hcd, 480M. vhf must not
                                   # land on this one — confirm with lsusb -t

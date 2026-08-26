@@ -385,7 +385,27 @@ something you don't own: the NOAA weather transmitters at 162.400–162.550 MHz 
 gear held to tight tolerance and are a useful free second opinion. Tune there, capture, and see
 whether the offset agrees.
 
-**Record the ppm.** It goes into `--ppm` in Phase 2 and every phase after.
+**Record the ppm.** It goes into `--ppm` and the profile, in Phase 2 and every phase after.
+
+**The driver cannot apply it, and does not say so.** SoapyAirspy reports
+`hasFrequencyCorrection() == False`; `setFrequencyCorrection` neither takes effect nor
+raises, and the value reads back as 0.0. Measured on the bench, `--ppm +0.64` and
+`--ppm -0.64` produced byte-identical output. The deck now applies the correction to the
+tune request instead, which every driver honours — the Airspy accepts single-Hz steps.
+
+**Sign convention: positive means signals read low, and the value corrects them.** Do
+not derive this, check it, because getting it backwards doubles the error rather than
+removing it and nothing complains. Against a known carrier at 466.000000:
+
+```
+--ppm     0   ->  465.999776 MHz    -224 Hz
+--ppm +0.64   ->  466.000096 MHz     +96 Hz     correct
+--ppm -0.64   ->  465.999424 MHz    -576 Hz     doubled
+```
+
+**Toggle the generator off and capture again before believing any of it.** 466 MHz is a
+busy business allocation; a carrier sitting there may not be yours. Done on 2026-08-26 it
+also revealed a generator spur at 462.1687 MHz, 15.6 dB down.
 
 ---
 

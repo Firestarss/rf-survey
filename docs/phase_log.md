@@ -6,7 +6,7 @@ Full procedures live in `docs/bench-bringup.md`.
 | Phase | Status | Date | Headline |
 |---|---|---|---|
 | **0** — Pi alone, no radio | **PASS** | 2026-08-18 | 28.8% of one core, 27 concurrent, peak 71.6 °C, zero throttling, fan confirmed |
-| **1** — first radio, first signal | in progress | 2026-08-26 | radio 1 up; 7/7 FRS channels, −0.644 ppm; MiniSA and antenna steps outstanding |
+| **1** — first radio, first signal | in progress | 2026-08-26 | radio 1 up; 7/7 FRS channels; ppm closed at −0.64 on three references; antenna steps outstanding |
 | **2** — RF front end | — | — | |
 | **3** — tones and classification | — | — | |
 | **4** — logging and database | — | — | |
@@ -76,7 +76,7 @@ usb        Bus 004 Port 1, xhci-hcd, 480M high-speed, clean enumeration
 firmware   AirSpy NOS v1.0.0-rc10-0-g946184a  2016-09-19
 rates      10 MSPS and 2.5 MSPS
 gain       0-45 overall, filling LNA -> MIX -> VGA. NOT a 0-21 linearity control
-ppm        -0.644  (mean of 7 FRS channels, spread -0.53 to -0.77)
+ppm        -0.64   (three references; profile carries ppm: 0.64 to correct it)
 ```
 
 **FRS channels 1-7**, dummy load, gain 42, handheld at low power a few feet away.
@@ -94,10 +94,29 @@ case against a nominal 25 kHz step — 0.29%, and comparable to the interpolator
 | 6 | 462.6875 | 462.687200 | -300 Hz | -0.65 |
 | 7 | 462.7125 | 462.712224 | -276 Hz | -0.60 |
 
-The ppm figure is the deck measured against a consumer handheld, so it is a difference
-between two clocks. It is independently corroborated by a real transmitter on exactly
-464.000000 MHz reading -0.6 to -0.8 ppm. Step 12 against the MiniSA is still outstanding
-and is a third reference.
+**Step 12 done, 2026-08-26.** Three independent references, and they do not all agree
+— which is the entire reason for having three:
+
+| Reference | Reads | What it is |
+|---|---|---|
+| FRS handheld, 7 channels | -0.644 ppm | consumer TCXO |
+| 464.000000 MHz transmitter | -0.65 ppm | licensed Part 90, tight tolerance |
+| tinySA Ultra generator | -0.41 ppm | inexpensive lab generator |
+
+The two agreeing to 0.01 ppm are a commercial transmitter and a handheld, measured on
+different days at different frequencies on different signal types. The outlier is the
+generator, exactly as `phase1-detail.md` warned. **The deck is low by -0.64 ppm and the
+tinySA Ultra's output is +0.21 ppm high of what it displays** — worth writing on the
+tinySA's case, since it is now a known property of the test gear.
+
+The generator was confirmed to be the source by toggling its output off and re-capturing:
+the 466.000 carrier vanished, and so did a spur at 462.1687 MHz sitting 15.6 dB below it.
+466 MHz is a busy business allocation in Boston, so without that check the measurement
+could have been made against someone else's transmitter entirely.
+
+**`ppm: 0.64` is in the profile.** The sign is positive-means-signals-read-low, verified
+on hardware rather than reasoned about: +0.64 brings a known carrier to within 96 Hz,
+-0.64 doubles the error to -576 Hz.
 
 **Zero clipping frames** at every gain from 0 to 45 with the handheld keyed nearby.
 Overflows were zero on every capture except one taken while the test suite was running
@@ -113,7 +132,7 @@ half its stated duration, and captures took 3.1 GB. All fixed; see handoff secti
 - [ ] Notch filter measured, ≥30 dB at 88-108 and ≤1.5 dB at 466 (MiniSA, step 9)
 - [ ] Both 20 dB pads measured and labelled A/B, difference recorded (MiniSA, step 10)
 - [ ] Antenna-versus-dummy delta 8-10 dB — start at gain 36, not 12 (step 11)
-- [ ] ppm confirmed against the MiniSA generator (step 12)
+- [x] ppm confirmed against the MiniSA generator (step 12) — done 2026-08-26
 - [ ] Everything in the spectrum accounted for (step 13)
 
 **Open question carried into the gate.** Three signals sit above `detection.on_db`

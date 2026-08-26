@@ -796,6 +796,41 @@ def spectrum_floor(chan_arr, width=FLOOR_MEDIAN_CHANNELS):
     return median_filter(per_channel, size=width, mode="nearest")
 
 
+def tune_request_hz(center_hz, ppm):
+    """What to ask the driver for, so the LO lands on `center_hz` in true Hz.
+
+    `setFrequencyCorrection` is not usable here. SoapyAirspy reports
+    `hasFrequencyCorrection() == False`, and setting it neither takes effect nor
+    raises — the value reads back as 0.0 and the tuning does not move. Both call
+    sites wrapped it in a try/except, so even an exception would have been
+    swallowed; measured on the bench, `--ppm +0.64` and `--ppm -0.64` produced
+    byte-identical output. The one number Phase 1 exists to produce was being
+    accepted, recorded into the run, and silently discarded.
+
+    So the correction is applied here instead, to the request, which every
+    driver honours: the Airspy accepts single-Hz tuning steps. Doing it in
+    software rather than per-driver also means the behaviour does not change
+    under a radio that *does* implement the call — which would otherwise
+    double-correct.
+
+    `ppm` is the receiver's clock error, positive when signals read LOW by that
+    much, which is the sense every measurement in `docs/phase_log.md` records.
+    """
+    return center_hz / (1.0 + ppm * 1e-6)
+
+
+def true_center_hz(requested_hz, ppm):
+    """Where the LO actually landed, in true Hz, for a request the driver took.
+
+    The inverse of `tune_request_hz`, and it must be used for the frequency
+    axis: reading `getFrequency()` back and using it directly would re-apply the
+    very offset the request just removed. Going through the readback rather than
+    assuming the request was honoured keeps this correct if a driver quantises
+    the tune.
+    """
+    return requested_hz * (1.0 + ppm * 1e-6)
+
+
 def find_peaks(power_db, floor_db, freqs_hz, top=25, min_snr=6.0):
     """Strongest channels above the background, as (freq_hz, snr_db) pairs.
 
@@ -927,20 +962,15 @@ def spectrum_capture(args):
 
     sdr = SoapySDR.Device(device_args(args.driver, args.serial))
     sdr.setSampleRate(SOAPY_SDR_RX, 0, args.rate)
-    sdr.setFrequency(SOAPY_SDR_RX, 0, args.freq)
+    sdr.setFrequency(SOAPY_SDR_RX, 0, tune_request_hz(args.freq, args.ppm))
     try:
         sdr.setGainMode(SOAPY_SDR_RX, 0, False)
     except Exception:
         pass
     sdr.setGain(SOAPY_SDR_RX, 0, args.gain)
-    if args.ppm:
-        try:
-            sdr.setFrequencyCorrection(SOAPY_SDR_RX, 0, args.ppm)
-        except Exception:
-            pass
 
     rate = sdr.getSampleRate(SOAPY_SDR_RX, 0)
-    center = sdr.getFrequency(SOAPY_SDR_RX, 0)
+    center = true_center_hz(sdr.getFrequency(SOAPY_SDR_RX, 0), args.ppm)
     fs = frame_size(rate)
     grid = ChannelGrid(center, rate)
 
@@ -1497,6 +1527,9 @@ class Radio:
             self.dev = SoapySDR.Device(
                 device_args(args.driver, settings["serial_want"]))
 
+        # Held on the radio because every tune has to apply it, not just the
+        # first one: a rotating receiver retunes on every dwell.
+        self.ppm = float(settings.get("ppm") or 0.0)
         self.RX = self.api.SOAPY_SDR_RX
         self.OVERFLOW = self.api.SOAPY_SDR_OVERFLOW
         self._cf32 = self.api.SOAPY_SDR_CF32
@@ -1505,19 +1538,15 @@ class Radio:
     def configure(self, settings):
         """Apply the settings. Returns the rate and centre the device accepted."""
         self.dev.setSampleRate(self.RX, 0, settings["rate"])
-        self.dev.setFrequency(self.RX, 0, settings["windows"][0]["center_hz"])
+        self.dev.setFrequency(self.RX, 0, tune_request_hz(
+            settings["windows"][0]["center_hz"], self.ppm))
         try:
             self.dev.setGainMode(self.RX, 0, False)  # AGC off — non-negotiable
         except Exception:
             print("warning: could not disable AGC", file=sys.stderr)
         self.dev.setGain(self.RX, 0, settings["gain"])
-        if settings["ppm"]:
-            try:
-                self.dev.setFrequencyCorrection(self.RX, 0, settings["ppm"])
-            except Exception:
-                print("warning: driver rejected ppm correction", file=sys.stderr)
         return (self.dev.getSampleRate(self.RX, 0),
-                self.dev.getFrequency(self.RX, 0))
+                true_center_hz(self.dev.getFrequency(self.RX, 0), self.ppm))
 
     def serial(self, fallback):
         """The serial read back off the device, not the one that was asked for.
@@ -1537,8 +1566,8 @@ class Radio:
         return got
 
     def tune(self, center_hz):
-        self.dev.setFrequency(self.RX, 0, center_hz)
-        return self.dev.getFrequency(self.RX, 0)
+        self.dev.setFrequency(self.RX, 0, tune_request_hz(center_hz, self.ppm))
+        return true_center_hz(self.dev.getFrequency(self.RX, 0), self.ppm)
 
     def start(self):
         self.stream = self.dev.setupStream(self.RX, self._cf32)
