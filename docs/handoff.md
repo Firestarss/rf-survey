@@ -1,12 +1,13 @@
-# Handoff — state of the software as of 2026-08-19
+# Handoff — state of the software as of 2026-08-25
 
 Written for whoever picks this up next, agent or human. Covers what exists, why it is
 shaped this way, and what is deliberately unfinished. Read this before changing the
 schema or the enricher; several things that look arbitrary are load-bearing.
 
-Hardware has not arrived. Everything below was built and tested against synthetic
-events. **Nothing here has ever seen a real signal.** Treat every threshold as a guess
-until Phase 1 through 3 say otherwise.
+Both Airspys arrived 2026-08-25 and Phase 1 is in progress; section 8 covers the fixes
+that had to land before the bench procedure could be followed at all. Everything below
+that section was built and tested against synthetic events. **Nothing here has yet seen a
+real signal.** Treat every threshold as a guess until Phase 1 through 3 say otherwise.
 
 ---
 
@@ -621,7 +622,197 @@ of section 6 the selftest no longer checks correctness.
 
 ---
 
-## 8. Housekeeping still outstanding
+## 8. Fourth pass: --spectrum, and the first hardware
+
+The hardware landed on 2026-08-25. Reading `phase1-detail.md` against the code
+first — before plugging anything in — found that three of the four numbers Phase 1
+exists to produce could not be obtained with the tool the procedure names.
+
+The common cause is structural and is worth stating plainly. `spectrum_capture`
+imports SoapySDR directly instead of going through the `Radio` wrapper that
+exists precisely so `--simulate` can substitute itself (`survey_prototype.py`,
+`Radio.__init__`). So `--spectrum` was the one path the simulator could not
+reach, and like `run()` in section 4 it had never been executed. Everything
+below was found by standing a stub SoapySDR module in front of `simradio` and
+running it. **It is the same lesson as sections 4 and 6, arriving through a
+third door: the code that cannot be exercised is the code that is wrong.**
+
+### What running it found
+
+**The band reference level was never printed.** Steps 6 and 11 of the bench
+procedure both say to record it, and Gate 1's antenna-versus-dummy delta is the
+entire gain-setting method — raise gain until the antenna lifts that level
+8-10 dB. It was computed and used only to subtract for SNR, and since the peak
+list quotes SNR *relative* to it, the absolute level appeared nowhere in the
+output. There was no way to perform the gain step as written.
+
+**The peak list reported every skirt.** An FM transmission at 2.5-5 kHz
+deviation spans about 11 kHz against a 6.25 kHz grid, so each carrier lights its
+own channel and both neighbours. The live detector has required a local maximum
+since section 4; `find_peaks` never got the same rule. Measured on a simulated
+step 8 sweep: **seven keyups printed twenty-one entries.** Gate 1 asks the
+operator to account for every entry in the list, and the `top=25` cap meant
+skirts of strong signals displaced genuinely weak ones — the exact entries step
+13 exists to find.
+
+**Step 12 could not measure ppm at all, and returned a confident zero.** The
+peak list reported `channels * CHANNEL_HZ`, quantised to 6.25 kHz. The procedure
+tunes a generator to exactly 466.000 MHz, which sits precisely on a slot, and
+expects to resolve the ±470 Hz that is ±1 ppm — so every error under ±3125 Hz
+rounded to 466.0000 and read as 0.0 ppm. ppm is one of the three numbers Phase 1
+exists to produce and it feeds `--ppm`, the profile, and every later phase.
+
+`refine_peak_hz` now interpolates a parabola through the peak FFT bin and its two
+neighbours, in dB, and the peak list carries a measured frequency, an offset in
+Hz and a ppm figure per entry. Measured against known offsets through the full
+capture path:
+
+```
+true offset     measured     error     as ppm
+          0          0.0      +0.0     +0.000
+        120        128.0      +8.0     +0.017
+       -300       -320.0     -20.0     -0.043
+        470        512.0     +42.0     +0.090
+       1200       1216.0     +16.0     +0.034
+       2400       2400.0      +0.0     +0.000
+```
+
+Worst 42 Hz, or 0.09 ppm at 466 MHz — an order of magnitude inside the ±1 ppm
+gate, and stable down to 12 dB SNR. Bins are 2441 Hz at 10 MSPS, so this is
+resolving a fiftieth of a bin.
+
+**A dedicated high-resolution ppm mode was considered and rejected.** It would
+measure the *difference between two clocks* more precisely, and the procedure's
+own caveat is that the MiniSA's reference oscillator is plausibly worse than the
+Airspy's — so the extra precision lands entirely on the unknown. Use the NOAA
+transmitters at 162.400-162.550 MHz as the accuracy cross-check instead, as the
+procedure already suggests; ppm is constant across frequency, so a reading there
+applies at 466 MHz. The independent second opinion is `freq_raw_hz - freq_hz` per
+event, which measures the same thing through the real capture path rather than a
+diagnostic side-path. Two roughly-agreeing numbers from different paths are worth
+more than one very precise number from one. Revisit only if those disagree.
+
+The per-entry ppm column also makes step 8's evenly-spaced test real. That check
+distinguishes a clock offset, which is benign, from a sample-rate fault, which
+the procedure rightly calls much more serious — and on the grid alone it could
+never have failed, because all seven channels always snapped to nominal.
+
+### Tests
+
+`tests/test_spectrum.py`, 10 tests. It carries the stub-SoapySDR harness, so
+`--spectrum` is now reachable without hardware and the next change to it is
+checked rather than inspected. The suite is 211 tests.
+
+### Documentation corrected
+
+- Every bench command said `python3 survey_prototype.py`; it is in `src/`. The
+  same mistake `deck-check.sh` made in section 6.
+- `collect-diag.sh` does not exist and never has. The collector is
+  `bash tools/deck-check.sh diag`.
+- The host is `radio-deck`, not `surveydeck`.
+- `bench-bringup.md`'s sample output block predated all of the above and showed
+  a peak list that the code could not produce.
+
+### Then the radio was plugged in, and found three more
+
+The first Airspy went in that evening. Everything above was still synthetic;
+these came from the hardware within the hour, and the first one is the reason
+none of the rest could have been found earlier.
+
+**`SoapySDR.Device({"driver": "airspy"})` does not work.** A plain Python dict
+raises `make() no match` on the 0.8.0 bindings Ubuntu 26.04 ships; the string
+markup `"driver=airspy,serial=..."` works, as does the `SoapySDRKwargs` that
+`enumerate()` returns. Both hardware call sites built dicts, so **the deck could
+not open a radio at all** — and the error is indistinguishable from no radio
+being present. `--simulate` substitutes `SimulatedRadio` for the entire `Device`
+call, so no amount of running without hardware could have reached the line. Now
+in `device_args()`.
+
+Serial addressing was verified against the hardware at the same time: matching
+is case-insensitive and tolerates a leading `0x`, and a serial matching nothing
+is refused rather than silently opening whatever is attached. Section 2's
+"address by serial, never by index" holds.
+
+**`--spectrum-seconds` ran for exactly half the time it was given.**
+`readStream` returns whatever the driver's transfer size is and ignores the
+count asked for — this Airspy returns 65536 samples against the 131072
+requested, every single call. The loop counted each return as one full frame,
+so a 120 s sweep closed after 60 s of signal. Nothing in the output disclosed
+it, because the summary line printed the duration that had been *requested*.
+
+It was found because the operator noticed the window felt short when a
+seven-channel bench sweep kept losing its last channels — not by any check in
+the program. The loop now runs on samples delivered, and every line that
+mentions a duration reports what actually arrived.
+
+**Gain is not the control the bench procedure describes.** `phase1-detail.md`
+said the driver exposes a "linearity" setting from 0 to 21. It does not: this
+module exposes an overall 0–45 dB that fills three stages **in sequence** — LNA
+0–15, then MIX 0–15, then VGA 0–15. Measured on a 50 ohm load at 466 MHz:
+
+```
+--gain   30     33     36     39     42     45
+VGA       0      3      6      9     12     15
+floor  -131.1 -130.9 -128.4 -121.8 -112.1 -102.3 dB
+```
+
+Flat to gain 33 and then rising about 10 dB per three steps, so the VGA numbers
+are index steps rather than dB. Below the knee at ~36 the receiver is
+**ADC-noise-limited**: the front end is amplifying but its noise is still under
+the converter's own floor. That is why the profile's `gain: 12` — LNA only,
+nothing else — read a handheld ten feet away at 9.6 dB SNR, and the same radio
+at gain 42 read it at 48.6 dB.
+
+**Step 11 cannot work below that knee at all.** Its method is to raise gain
+until the antenna lifts the noise floor 8–10 dB over a dummy load, and below
+gain 33 the floor is pinned by the converter and no antenna would move it.
+
+### Memory, once captures ran their full length
+
+Fixing the duration doubled the frame count and exposed the next ceiling: a 60 s
+capture peaked at **3.1 GB** resident, which projects to roughly 15 GB for the
+300 s capture step 13 asks for. The peak and average traces are running
+statistics that never needed history, and the waterfall needs at most a
+screenful of rows. Both are accumulated now, with waterfall rows **max-pooled**
+onto a stride that doubles as the buffer fills — pooled rather than sampled,
+because thinning would alias away a keyup shorter than the stride, which is
+exactly what the picture is read for. Same 60 s capture: **1.0 GB, and 65 s wall
+clock against 78 s.**
+
+### What the first real spectrum showed
+
+Boston metro, dummy load, gain 42. Distinguishing the receiver's own artefacts
+from a genuinely busy band turned out to have a clean test that costs nothing:
+
+**An internal spur is coherent with the receiver's own reference, so it reports
+zero frequency offset. A real transmitter shows the receiver's clock error.**
+470.000000 MHz reads `+0 Hz` on every capture and is internal. 464.000000 MHz
+reads −0.6 to −0.8 ppm — the deck's own clock error — and is a real transmitter
+on a legitimate Part 90 frequency. The strong wandering signals around 468.1 and
+468.5 are Boston UHF business traffic, different transmitters at different
+moments, which is why they appear at a different frequency in every capture.
+
+That test only exists because the peak list reports a measured frequency, which
+it did not until the same day. Three of these sit above `detection.on_db` of
+10.0 dB, so the deck as configured would log them as traffic.
+
+**The band-wide floor breaks down once the passband is visible.** `find_peaks`
+compares every channel against one scalar median. At gain 12 the ADC's flat
+noise hid the analog response; at gain 42 the real shape appears — rolled off
+below 461.5 and above 470.3, with a raised shoulder at 470.3–470.6 that
+manufactures a cluster of +6 dB entries that are not signals. A floor that
+follows frequency while still ignoring narrow carriers is the fix. Not yet done.
+
+### Still true and still unmeasured
+
+Nothing here has seen a real signal either. Every number above came from
+`simradio`, which has no path loss, no multipath and no adjacent-channel
+splatter, and its "carrier" for the ppm work is a mathematically exact complex
+exponential. It says the arithmetic is right. It cannot say the receiver is.
+
+---
+
+## 9. Housekeeping still outstanding
 
 - DHCP reservation for `radio-deck` — it moved .243 to .244 mid-session once already
 - WiFi power save disabled via systemd oneshot (no NetworkManager on Ubuntu Server)

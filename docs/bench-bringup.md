@@ -193,7 +193,7 @@ The commands below use the sysfs paths, which work on both.
 ### Find it and get in
 
 ```bash
-ssh <user>@surveydeck.local          # mDNS, works on most networks
+ssh <user>@radio-deck.local          # mDNS, works on most networks
 # if that fails, check your router's DHCP client list for the IP
 ```
 
@@ -350,7 +350,7 @@ Three options. Use the first for gates, the second if you want to poke around.
 **1. Built-in capture — works over any connection**
 
 ```bash
-python3 survey_prototype.py --driver airspy --serial <SERIAL> \
+python3 src/survey_prototype.py --driver airspy --serial <SERIAL> \
   --freq 466.0e6 --rate 10e6 --gain 12 \
   --spectrum band.png --spectrum-seconds 20
 ```
@@ -359,13 +359,23 @@ Writes a PNG with an averaged spectrum and a waterfall, and prints the strongest
 text right in your terminal:
 
 ```
+  span 461.000 - 471.000 MHz
+  band reference level   -93.0 dB   (median over 1594 channels)
+  overflows 0   clipping frames 0
+
   strongest channels (peak hold over 20 s):
-     462.5625 MHz   + 32.6 dB
-     464.5500 MHz   + 25.3 dB
-     467.7000 MHz   + 18.0 dB
+     channel          SNR     measured        offset from channel
+       462.5625 MHz   +32.6 dB    462.562512 MHz       +12 Hz  ( +0.03 ppm)
+       464.5500 MHz   +25.3 dB    464.550020 MHz       +20 Hz  ( +0.04 ppm)
+       467.7000 MHz   +18.0 dB    467.699972 MHz       -28 Hz  ( -0.06 ppm)
 ```
 
-Then `scp <user>@surveydeck.local:band.png .` to look at it. The text alone answers most
+The `band reference level` line is what Phase 1 sets the gain against, and `measured` is
+what it reads ppm off — the channel column is snapped to the 6.25 kHz grid and cannot show
+either. One entry per carrier: the skirts an FM signal puts on its neighbouring channels are
+suppressed, as in the live detector.
+
+Then `scp <user>@radio-deck.local:band.png .` to look at it. The text alone answers most
 questions; the PNG is for when something looks odd.
 
 Note this uses a *band-wide* reference level rather than the rolling one the live detector
@@ -379,7 +389,7 @@ sudo apt install -y soapysdr-module-remote      # on the Pi
 SoapySDRServer --bind                            # runs it
 ```
 
-Then on your laptop, point SDR++ or gqrx at `driver=remote,remote=surveydeck.local`. You get
+Then on your laptop, point SDR++ or gqrx at `driver=remote,remote=radio-deck.local`. You get
 a full-speed waterfall on a big screen, with the Pi just streaming samples.
 
 Full rate is ~30 MB/s, which wants gigabit ethernet. Over WiFi, drop to 2.5 MSPS for
@@ -407,12 +417,17 @@ Filters at this price are sometimes not what the label claims.
 
 ### Set the gain, once, properly
 
-1. Antenna off, dummy load on. Run `--spectrum`, note the band reference level it prints.
+1. Antenna off, dummy load on. Run `--spectrum`, note the `band reference level` line it
+   prints. Not a peak-list number — those are relative to it.
 2. Antenna on. Raise gain until that level rises 8–10 dB.
 3. Confirm the capture reports **zero clipping frames** while someone keys nearby.
 4. **Write the number down.** Standing setting.
 
-Airspy gain splits across three stages. Start in "linearity" mode around 8–12.
+Airspy gain splits across three stages, but **not** the way this line used to say. The
+SoapySDR module exposes an overall 0–45 dB filling LNA, then MIX, then VGA — there is no
+0–21 "linearity" control. The receiver is ADC-noise-limited below about gain 36, so the
+8–10 dB delta above is unreachable underneath that. Start at **36** and step by 3.
+Measured numbers in `phase1-detail.md` step 11.
 
 ### Measure the frequency error
 
@@ -442,7 +457,7 @@ and you need more attenuation.
 ## Phase 2 — detection and logging
 
 ```bash
-python3 survey_prototype.py \
+python3 src/survey_prototype.py \
   --driver airspy --serial <SERIAL> \
   --freq 466.0e6 --rate 10e6 --gain 12 \
   --ppm <MEASURED> --db data/survey.sqlite --receiver-id uhf --stats

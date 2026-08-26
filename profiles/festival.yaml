@@ -14,7 +14,12 @@ description: FRS, GMRS, Part 90 business, plus 2 m and 70 cm ham
 receivers:
 
   uhf:
-    serial: null                  # TODO Phase 1: airspy_info / SoapySDRUtil --find
+    # Measured Phase 1, 2026-08-26. SoapySDR spells it lowercase and without the
+    # 0x that airspy_info prints; matching is case-insensitive and tolerates the
+    # prefix, verified against the hardware, so either form selects this radio.
+    # A serial that matches nothing is refused rather than opening whatever is
+    # attached — which is what makes addressing by serial worth doing.
+    serial: 637862dc2e4c6dd7
     mode: parked
     center_hz: 466_000_000        # covers 461–471: all FRS, GMRS, UHF dots and stars
     sample_rate: 10_000_000
@@ -22,7 +27,8 @@ receivers:
     ppm: 0.0                      # TODO Phase 1: measure against a known reference
     attenuator_db: 20             # physically fitted, not software-controlled
     antenna: null                 # TODO: record what is actually screwed on
-    usb_bus: null                 # TODO: must differ from vhf — confirm with lsusb -t
+    usb_bus: 4                    # Bus 004 Port 1, xhci-hcd, 480M. vhf must not
+                                  # land on this one — confirm with lsusb -t
 
   vhf:
     serial: null                  # TODO Phase 5

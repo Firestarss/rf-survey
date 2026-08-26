@@ -725,21 +725,120 @@ def analyze_analog(iq, rate, offset_hz, keep_signals=False):
 
 
 # ---------------------------------------------------------------------------
-# Database
+# Spectrum diagnostics
+#
+# Everything Phase 1 does, it does through --spectrum. This block is the whole
+# bench procedure: the reference level the gain is set against, the peak list
+# the channel sweep is read from, and the frequency estimate ppm is measured
+# with. None of it goes through the Radio wrapper, so --simulate cannot reach
+# it and it went unrun until 2026-08-25.
 # ---------------------------------------------------------------------------
 
+def device_args(driver, serial=None):
+    """SoapySDR device arguments, as markup rather than a dict.
+
+    `SoapySDR.Device({"driver": "airspy"})` raises `make() no match` on the
+    0.8.0 Python bindings Ubuntu 26.04 ships: a plain dict is not converted to
+    the Kwargs type the binding wants, and the resulting error is
+    indistinguishable from no radio being present. Both hardware call sites
+    built a dict, so the deck could not open a radio at all.
+
+    Invisible until the first Airspy was plugged in on 2026-08-26, because
+    --simulate substitutes SimulatedRadio for the entire Device call and never
+    reaches this line. The string form works on every version, as does the
+    SoapySDRKwargs that `Device.enumerate()` hands back.
+
+    Serial matching is case-insensitive and tolerates a leading `0x`, verified
+    against hardware — `airspy_info` prints `0x637862DC2E4C6DD7` while SoapySDR
+    reports `637862dc2e4c6dd7`, and all three spellings select the device. A
+    serial that matches nothing is refused rather than silently opening
+    whatever is attached, which is what makes "address by serial, never by
+    index" hold with two radios present.
+    """
+    spec = f"driver={driver}"
+    if serial:
+        spec += f",serial={serial}"
+    return spec
+
+
 def find_peaks(power_db, floor_db, freqs_hz, top=25, min_snr=6.0):
-    """Strongest channels above the background, as (freq_hz, snr_db) pairs."""
+    """Strongest channels above the background, as (freq_hz, snr_db) pairs.
+
+    Only a local maximum is reported, for the reason EventDetector.step gives
+    at length: one FM transmission at 2.5-5 kHz deviation occupies about 11 kHz
+    against a 6.25 kHz grid, so every carrier lights up its own channel and
+    both neighbours. Measured on a simulated seven-channel FRS sweep, the
+    ungated list printed twenty-one entries for seven keyups — and Gate 1 asks
+    the operator to account for every entry in it. The skirts also displace
+    real but weaker signals out of the `top` cap, which is backwards: the
+    entries being crowded out are the ones worth looking at.
+
+    +/-1 channel is deliberate and matches the detector. It covers the skirts
+    without merging anything 12.5 kHz apart, which is the closest two real
+    channels ever get.
+    """
     snr = power_db - floor_db
-    idx = np.flatnonzero(snr >= min_snr)
+    padded = np.concatenate(([-np.inf], snr, [-np.inf]))
+    local_max = (snr >= padded[:-2]) & (snr >= padded[2:])
+    idx = np.flatnonzero((snr >= min_snr) & local_max)
     if len(idx) == 0:
         return []
     idx = idx[np.argsort(snr[idx])[::-1]][:top]
     return [(float(freqs_hz[i]), float(snr[i])) for i in idx]
 
 
-def render_spectrum(frames_db, center, rate, path, title):
-    """Write an averaged spectrum and waterfall to a PNG. No display needed."""
+def refine_peak_hz(spec_db, base_hz, bin_hz, target_hz, search_hz=CHANNEL_HZ):
+    """Sub-bin frequency of the strongest FFT bin near `target_hz`, or None.
+
+    The peak list names channels, and a channel is a 6.25 kHz slot. That is the
+    right answer to "which channel was that" and useless for "what is my clock
+    error": Phase 1 measures ppm by reading where a known carrier lands and
+    expects to resolve a few hundred Hz, but on the grid every error under
+    +/-3125 Hz reports as exactly zero. 466.000 MHz sits dead on a slot
+    boundary, so the measurement as documented always returned 0.0 ppm.
+
+    Parabolic interpolation through the peak bin and its two neighbours, in dB.
+    A Hann main lobe is close to parabolic in dB near its apex, which is what
+    makes three points enough; bins are 2441 Hz at 10 MSPS and this resolves a
+    fraction of one. Accuracy against known offsets is measured in
+    tests/test_spectrum.py rather than asserted here.
+
+    Meaningful for a carrier. A voice-modulated FM signal has no single apex to
+    find, so the caller must present this as an estimate, not a measurement.
+    """
+    n = len(spec_db)
+    # Bins within search_hz of the target, clamped so the parabola always has
+    # both neighbours to sit on.
+    i_lo = max(1, int(np.ceil((target_hz - search_hz - base_hz) / bin_hz)))
+    i_hi = min(n - 2, int(np.floor((target_hz + search_hz - base_hz) / bin_hz)))
+    if i_hi < i_lo:
+        return None
+    window = spec_db[i_lo:i_hi + 1]
+    idx = i_lo + int(np.argmax(window))
+    a, b, c = spec_db[idx - 1], spec_db[idx], spec_db[idx + 1]
+    denom = a - 2.0 * b + c
+    if denom >= 0:
+        return None                      # no interior maximum to interpolate
+    delta = 0.5 * (a - c) / denom
+    if abs(delta) > 1.0:
+        return None                      # apex outside the bracket; distrust it
+    return float(base_hz + (idx + delta) * bin_hz)
+
+
+# Rows of waterfall retained for the PNG. The image is about 600 px tall, so
+# more rows than this cannot be seen; keeping every frame instead cost 3.1 GB of
+# resident memory on a 60 s capture and would not have survived the 300 s one
+# step 13 asks for.
+WATERFALL_ROWS = 1500
+
+
+def render_spectrum(peak_db, avg_db, waterfall, center, rate, path, title):
+    """Write an averaged spectrum and waterfall to a PNG. No display needed.
+
+    Takes the peak and average traces already accumulated rather than a stack of
+    every frame: they are running statistics and never needed the history, and
+    the history is what made this the memory ceiling of the whole program.
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -749,7 +848,7 @@ def render_spectrum(frames_db, center, rate, path, title):
               "(sudo apt install python3-matplotlib)", file=sys.stderr)
         return False
 
-    arr = np.asarray(frames_db)
+    arr = np.asarray(waterfall)
     mhz_lo = (center - rate / 2) / 1e6
     mhz_hi = (center + rate / 2) / 1e6
 
@@ -757,11 +856,9 @@ def render_spectrum(frames_db, center, rate, path, title):
         2, 1, figsize=(12, 8), sharex=True,
         gridspec_kw={"height_ratios": [1, 2]})
 
-    avg = arr.mean(axis=0)
-    peak = arr.max(axis=0)
-    x = np.linspace(mhz_lo, mhz_hi, arr.shape[1])
-    ax1.plot(x, peak, lw=0.6, alpha=0.5, label="peak hold")
-    ax1.plot(x, avg, lw=0.8, label="average")
+    x = np.linspace(mhz_lo, mhz_hi, len(peak_db))
+    ax1.plot(x, peak_db, lw=0.6, alpha=0.5, label="peak hold")
+    ax1.plot(x, avg_db, lw=0.8, label="average")
     ax1.set_ylabel("dB")
     ax1.legend(loc="upper right", fontsize=8)
     ax1.grid(alpha=0.3)
@@ -771,7 +868,7 @@ def render_spectrum(frames_db, center, rate, path, title):
                extent=[mhz_lo, mhz_hi, 0, arr.shape[0]],
                vmin=np.percentile(arr, 5), vmax=np.percentile(arr, 99.5))
     ax2.set_xlabel("MHz")
-    ax2.set_ylabel("frame")
+    ax2.set_ylabel("waterfall row")
 
     fig.tight_layout()
     fig.savefig(path, dpi=110)
@@ -784,10 +881,7 @@ def spectrum_capture(args):
     import SoapySDR
     from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32
 
-    spec = {"driver": args.driver}
-    if args.serial:
-        spec["serial"] = args.serial
-    sdr = SoapySDR.Device(spec)
+    sdr = SoapySDR.Device(device_args(args.driver, args.serial))
     sdr.setSampleRate(SOAPY_SDR_RX, 0, args.rate)
     sdr.setFrequency(SOAPY_SDR_RX, 0, args.freq)
     try:
@@ -805,43 +899,90 @@ def spectrum_capture(args):
     center = sdr.getFrequency(SOAPY_SDR_RX, 0)
     fs = frame_size(rate)
     grid = ChannelGrid(center, rate)
-    floor_est = NoiseFloor(grid.n)
 
-    n_frames = max(20, int(args.spectrum_seconds * rate / fs))
-    print(f"capturing {args.spectrum_seconds:.0f} s at {center/1e6:.4f} MHz, "
-          f"{rate/1e6:.1f} MSPS ({n_frames} frames)...")
+    # Run until the requested number of SAMPLES has arrived, not a frame count.
+    # readStream hands back whatever the driver's transfer size is and ignores
+    # the count asked for: this Airspy returns 65536 every time against the
+    # 131072 requested. Counting each return as one full frame therefore ran
+    # --spectrum-seconds at exactly HALF the requested duration -- a "two
+    # minute" sweep closed after 60 s of signal, which is how a seven-channel
+    # bench sweep kept losing its last channels. Found on the bench 2026-08-26
+    # because the operator noticed the window felt short; nothing in the output
+    # said so, because the summary line printed the number that had been asked
+    # for rather than the one that arrived.
+    want_samples = max(20 * fs, int(round(args.spectrum_seconds * rate)))
+    print(f"capturing {want_samples/rate:.0f} s at {center/1e6:.4f} MHz, "
+          f"{rate/1e6:.1f} MSPS...")
 
     stream = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
     sdr.activateStream(stream)
     chunk = np.empty(fs, np.complex64)
     periodogram = Periodogram(rate)
 
-    frames_db = []
+    # The peak and average traces are running statistics, so they are
+    # accumulated rather than stored. Only the waterfall wants history, and it
+    # wants at most a screenful: rows are kept on a stride that doubles whenever
+    # the buffer fills, so memory is bounded no matter how long the capture runs.
+    spec_max = None
+    spec_sum = None
+    n_spec = 0
+    waterfall = []
+    wf_stride = 1
+    wf_accum = None
+    wf_count = 0
     chan_db = []
     overflows = 0
     clipped = 0
+    got_samples = 0
     try:
-        while len(frames_db) < n_frames:
+        while got_samples < want_samples:
             st = sdr.readStream(stream, [chunk], fs, timeoutUs=2_000_000)
             if st.ret <= 0:
                 if st.ret == SoapySDR.SOAPY_SDR_OVERFLOW:
                     overflows += 1
                 continue
             s = chunk[:st.ret]
+            got_samples += st.ret
             if np.mean(np.abs(s) > 0.9) > 1e-4:
                 clipped += 1
             psd = periodogram(s)
             if psd is None:
                 continue
-            frames_db.append(to_db(psd))
-            cdb = to_db(grid.power(psd))
-            chan_db.append(cdb)
-            floor_est.update(cdb)
+            db = to_db(psd).astype(np.float32)
+            if spec_max is None:
+                spec_max = db.copy()
+                spec_sum = db.astype(np.float64)
+            else:
+                np.maximum(spec_max, db, out=spec_max)
+                spec_sum += db
+            n_spec += 1
+            # Max-pool each group rather than keeping one frame out of every
+            # `wf_stride`. Sampling would alias away exactly what the waterfall
+            # is read for: a keyup shorter than the stride falls between the
+            # retained rows and vanishes from the picture, while still being
+            # counted everywhere else. Pooling cannot lose a burst, only widen
+            # one. Same reason the rows are merged pairwise, not thinned, when
+            # the buffer fills.
+            wf_accum = db if wf_accum is None else np.maximum(wf_accum, db)
+            wf_count += 1
+            if wf_count == wf_stride:
+                waterfall.append(wf_accum)
+                wf_accum = None
+                wf_count = 0
+                if len(waterfall) >= 2 * WATERFALL_ROWS:
+                    waterfall = [np.maximum(a, b) for a, b in
+                                 zip(waterfall[::2], waterfall[1::2])]
+                    wf_stride *= 2
+            # Kept in full: this is the narrow one (channels, not FFT bins) and
+            # the band-wide floor is a median over time, which needs the history.
+            chan_db.append(to_db(grid.power(psd)).astype(np.float32))
+        if wf_accum is not None:
+            waterfall.append(wf_accum)
     finally:
         sdr.deactivateStream(stream)
         sdr.closeStream(stream)
 
-    if not frames_db:
+    if not n_spec:
         print("no samples captured", file=sys.stderr)
         return
 
@@ -857,20 +998,55 @@ def spectrum_capture(args):
     peaks = find_peaks(chan_arr.max(axis=0),
                        np.full(grid.n, floor_db), grid.freqs_hz)
 
+    # Full-resolution peak hold, for the sub-bin frequency estimate. The channel
+    # grid is what names a signal; this is what measures one.
+    spec_peak = spec_max
+    spec_avg = spec_sum / n_spec
+    bin_hz = rate / NFFT
+    base_hz = center - rate / 2.0
+
+    actual_s = got_samples / rate
     title = (f"{center/1e6:.3f} MHz  {rate/1e6:.1f} MSPS  gain {args.gain}"
-             f"   {time.strftime('%Y-%m-%d %H:%M')}")
-    if render_spectrum(frames_db, center, rate, args.spectrum, title):
+             f"   {actual_s:.0f} s   {time.strftime('%Y-%m-%d %H:%M')}")
+    if render_spectrum(spec_peak, spec_avg, waterfall, center, rate,
+                       args.spectrum, title):
         print(f"wrote {args.spectrum}")
 
     print(f"\n  span {(center-rate/2)/1e6:.3f} - {(center+rate/2)/1e6:.3f} MHz")
+    # Steps 6 and 11 of the bench procedure both turn on this number: the gain
+    # is set by raising it until the antenna lifts this level 8-10 dB over the
+    # dummy load. The peaks below are quoted RELATIVE to it, so without it
+    # printed the absolute level appeared nowhere in the output at all.
+    print(f"  band reference level {floor_db:7.1f} dB   "
+          f"(median over {grid.n} channels)")
     print(f"  overflows {overflows}   clipping frames {clipped}")
     if clipped:
         print("  ** CLIPPING — add attenuation or reduce gain")
-    print(f"\n  strongest channels (peak hold over {args.spectrum_seconds:.0f} s):")
+
+    print(f"\n  strongest channels (peak hold over {actual_s:.0f} s "
+          f"of signal, {n_spec} frames):")
     if not peaks:
         print("    nothing above the background")
+    else:
+        print("     channel          SNR     measured        offset from channel")
     for f_hz, snr in peaks:
-        print(f"    {f_hz/1e6:11.4f} MHz   +{snr:5.1f} dB")
+        got = refine_peak_hz(spec_peak, base_hz, bin_hz, f_hz)
+        if got is None:
+            print(f"    {f_hz/1e6:11.4f} MHz  {snr:+6.1f} dB    "
+                  f"{'--':>13}")
+            continue
+        err = got - f_hz
+        ppm = err / (f_hz / 1e6)
+        print(f"    {f_hz/1e6:11.4f} MHz  {snr:+6.1f} dB   "
+              f"{got/1e6:11.6f} MHz  {err:+8.0f} Hz  ({ppm:+6.2f} ppm)")
+    if peaks:
+        # A clock error is common to every signal in the span; a transmitter off
+        # frequency is one row. Reading the column rather than any single number
+        # is what separates them, and it is also step 8's evenly-spaced test,
+        # which on the grid alone could never fail.
+        print("\n    'measured' is an interpolated estimate, sharp for a carrier "
+              "and soft for\n    voice. A consistent ppm down the column is the "
+              "receiver's clock; one row\n    adrift is that transmitter.")
     print()
 
 
@@ -1278,10 +1454,8 @@ class Radio:
         else:
             import SoapySDR
             self.api = SoapySDR
-            spec = {"driver": args.driver}
-            if settings["serial_want"]:
-                spec["serial"] = settings["serial_want"]
-            self.dev = SoapySDR.Device(spec)
+            self.dev = SoapySDR.Device(
+                device_args(args.driver, settings["serial_want"]))
 
         self.RX = self.api.SOAPY_SDR_RX
         self.OVERFLOW = self.api.SOAPY_SDR_OVERFLOW

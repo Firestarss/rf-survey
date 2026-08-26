@@ -148,15 +148,17 @@ Hand-tight on SMA. Snug, then a nudge. These are brass and you can strip them wi
 ## Step 6 — baseline capture, nothing but the dummy load
 
 ```bash
-cd ~/rf-deck        # wherever survey_prototype.py lives
+cd ~/rfsurvey       # the repository root; commands are relative to it
 
-python3 survey_prototype.py --driver airspy --serial <SERIAL> \
+python3 src/survey_prototype.py --driver airspy --serial <SERIAL> \
   --freq 466.0e6 --rate 10e6 --gain 12 \
   --spectrum baseline-dummy.png --spectrum-seconds 20
 ```
 
-**Record the band reference level it prints.** That's your "quiet" number and everything in
-step 11 is measured against it.
+**Record the band reference level it prints** — the line reading `band reference level`.
+That's your "quiet" number and everything in step 11 is measured against it. Note the peaks
+are quoted as SNR *relative* to that level, so it is the reference line you want, not any
+number from the peak list.
 
 The peak list should be nearly empty, or show only things a few dB above the floor. **Anything
 strong here, with a dummy load on, is being generated inside your own box** — USB, the NVMe,
@@ -181,7 +183,7 @@ That's exactly what you want for a first test: it proves the whole receive path 
 to the front end.
 
 ```bash
-python3 survey_prototype.py --driver airspy --serial <SERIAL> \
+python3 src/survey_prototype.py --driver airspy --serial <SERIAL> \
   --freq 466.0e6 --rate 10e6 --gain 12 \
   --spectrum first-signal.png --spectrum-seconds 20
 ```
@@ -201,14 +203,14 @@ One long capture, cycling channels during it, is easier than seven separate runs
 mode uses peak-hold, so everything you key shows up in the same list.
 
 ```bash
-python3 survey_prototype.py --driver airspy --serial <SERIAL> \
+python3 src/survey_prototype.py --driver airspy --serial <SERIAL> \
   --freq 466.0e6 --rate 10e6 --gain 12 \
   --spectrum channels.png --spectrum-seconds 90
 ```
 
 During those 90 seconds, key ~8 s on each of channels 1–7, changing channel between keyings.
 
-Expected in the peak list:
+Expected in the peak list — **seven entries, one per channel**:
 
 | Ch | MHz |
 |---|---|
@@ -220,7 +222,15 @@ Expected in the peak list:
 | 6 | 462.6875 |
 | 7 | 462.7125 |
 
-25 kHz apart, evenly. **A consistent offset across all seven is a clock error and step 12
+Seven, not twenty-one. Until 2026-08-25 each keyup also printed its two skirt channels at
+±6.25 kHz, because an FM signal spans about 11 kHz against a 6.25 kHz grid — so this sweep
+produced twenty-one entries and Gate 1 asked you to explain all of them. Only a local
+maximum is listed now, the same rule the live detector uses. If you do see a cluster of
+three around one carrier, the fix has regressed.
+
+25 kHz apart, evenly. Read the **offset** column rather than the channel column for this:
+the channel column is snapped to the 6.25 kHz grid and cannot show you spacing errors
+smaller than that. **A consistent ppm down the whole column is a clock error and step 12
 handles it. Uneven spacing is a sample-rate problem** and is much more serious — send me the
 list.
 
@@ -302,22 +312,66 @@ The number that tells you you're there is **8–10 dB**.
 5. **Write the number down.** This is a standing setting. Don't fiddle with it between runs or
    nothing you log will be comparable.
 
-Airspy gain is split across three internal stages, and the driver exposes an overall
-"linearity" setting from 0 to 21. Check `airspy-probe.txt` from step 4 for the exact names.
-Starting at 12 and moving in single steps is right.
+**Corrected 2026-08-26, measured on the hardware.** This step used to say the driver
+exposes a "linearity" setting from 0 to 21. It does not. `soapysdr-module-airspy` exposes
+an overall **0–45 dB** which fills three stages *in sequence* — LNA 0–15, then MIX 0–15,
+then VGA 0–15:
+
+| `--gain` | LNA | MIX | VGA |
+|---|---|---|---|
+| 12 | 12 | 0 | 0 |
+| 30 | 15 | 15 | 0 |
+| 42 | 15 | 15 | 12 |
+
+Measured band reference level on a 50 Ω load at 466 MHz:
+
+```
+--gain   0      12     30     33     36     39     42     45
+floor  -131.1 -131.2 -131.1 -130.9 -128.4 -121.8 -112.1 -102.3 dB
+```
+
+**Below about gain 36 the receiver is ADC-noise-limited** — the front end is amplifying,
+but its noise is still beneath the converter's own floor, so raising gain does nothing
+you can measure. The consequence for this step is direct: **the 8–10 dB antenna-versus-dummy
+delta cannot be reached below the knee**, because nothing moves the floor there. Start at
+**gain 36** and work up in steps of 3, not at 12 in steps of 1.
+
+For scale, a handheld ten feet away through a dummy load read **9.6 dB SNR at gain 12 and
+48.6 dB at gain 42**. If your first signal looks marginal, suspect the gain before the
+antenna.
+
+Note the VGA numbers are index steps, not dB — three of them move the floor about 10 dB.
+Check `airspy-probe.txt` from step 4 for what your driver exposes.
 
 ---
 
 ## Step 12 — measure the frequency error
 
 MiniSA generator at exactly 466.000000 MHz, **through the 20 dB pad**, direct into the Airspy.
-Capture, read where the peak actually lands.
+Capture, and read the `measured` and `ppm` columns of the peak list directly — the deck does
+the arithmetic:
+
+```
+     channel          SNR     measured        offset from channel
+       466.0000 MHz   +38.2 dB    466.000420 MHz      +420 Hz  ( +0.90 ppm)
+```
 
 ```
 ppm = (measured_Hz − 466000000) / 466
 ```
 
 So a peak at 466.000420 MHz is +420 Hz, which is +0.9 ppm.
+
+**This measurement did not work before 2026-08-25 and returned a confident zero.** The peak
+list reported only the channel grid, quantised to 6.25 kHz, and 466.000 MHz sits exactly on a
+slot — so every error smaller than ±3125 Hz, which is to say the entire range this step
+cares about, rounded to 466.0000 and read as 0.0 ppm. The `measured` column is a parabolic
+interpolation across the FFT bins and resolves to **within about 42 Hz (0.09 ppm)**, measured
+against known offsets in `tests/test_spectrum.py`. If you have an older Phase 1 log sheet
+with a ppm of exactly zero on it, that is what it means.
+
+The estimate is sharp for a carrier and soft for voice, so use the generator for this rather
+than a handheld.
 
 Expect under ±1 ppm. That's about ±470 Hz here, against 12.5 kHz channel spacing — comfortable.
 
@@ -342,7 +396,7 @@ The last Gate 1 row, and the one worth actually doing rather than ticking.
 Antenna on, full chain, working gain from step 11:
 
 ```bash
-python3 survey_prototype.py --driver airspy --serial <SERIAL> \
+python3 src/survey_prototype.py --driver airspy --serial <SERIAL> \
   --freq 466.0e6 --rate 10e6 --gain <YOURS> \
   --spectrum survey.png --spectrum-seconds 300
 ```
@@ -446,5 +500,5 @@ start caring about thermal headroom in an enclosure.
 | Clipping that more attenuation doesn't fix | possible front-end damage |
 | ppm above ±2 with the NOAA cross-check agreeing | worth understanding before Phase 2 |
 
-Send the peak-list text plus `bash collect-diag.sh > diag-phase1.txt`. The text list travels
+Send the peak-list text plus `bash tools/deck-check.sh diag > diag-phase1.txt`. The text list travels
 fine in a message on its own; attach the PNG only when something looks odd.
