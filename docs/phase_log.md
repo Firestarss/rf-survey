@@ -483,15 +483,40 @@ transmission it was. Receiver at 42.3854086, -71.0796309, chain
 | 141.3 | 22 | 227 m | 29.5 dB |
 | 136.5 | 21 | 412 m | 21.2 dB |
 | 131.8 | 20 | **492 m** | **NOT HEARD** |
+| 167.9 | 27 | **86 m** | **NOT HEARD** |
+| 173.8 | 28 | 209 m | 22.6 dB |
 
 **Six tones decoded correctly, capture ratio 0.71 to 1.0**, on live off-air
 signals from 21 to 66 dB SNR. Together with the 74.4 and 110.9 decoded earlier,
 that is eight distinct CTCSS tones identified correctly against a real
 transmitter. This is most of what Phase 3's first table asks for.
 
-**Path loss fits 28.9 dB per decade** — normal urban clutter, against 20 dB per
-decade for free space and 30-40 for dense urban. Extrapolated to `on_db` of
-10.0, the usable range of this chain is about **1.1 km**.
+**Coverage is a shape, not a radius.** Sorted by bearing rather than distance,
+the two later points turned a one-off into a pattern:
+
+| code | distance | bearing | residual vs fit |
+|---|---|---|---|
+| 24 | 109 m | 351 N | -0.7 dB |
+| 23 | 122 m | 41 N | +2.3 dB |
+| 22 | 227 m | 44 N | +1.2 dB |
+| 21 | 412 m | 99 E | +0.7 dB |
+| 28 | 209 m | 203 S | **-6.9 dB** |
+| 27 | 86 m | 195 S | **not heard** |
+| 20 | 492 m | 114 ESE | **not heard** |
+
+Every north and east path fits within 2.3 dB. Both southerly paths are broken,
+and 27 was not heard at **86 m** while 109 m and 122 m returned 37 and 39 dB.
+Distance is not the weak variable here — direction is.
+
+Caveat kept deliberately: a missing transmission can always be a radio that did
+not key rather than a path that did not carry. 28 corroborates the southern hole
+at the same bearing, 6.9 dB down but audible. 20's miss stands more alone.
+
+**Path loss fits 30.5 dB per decade, R^2 = 0.937, residual sigma 3.8 dB** —
+normal urban clutter, against 20 dB per decade for free space and 30-40 for
+dense urban. The fit is *good*, which is the point: where the deck has a path,
+distance predicts the level within a few dB. Extrapolated to `on_db` of 10.0 the
+usable range is about **910 m** along a clear bearing.
 
 **The gym transmission was obstruction, not range, and three earlier readings of
 it here were wrong.** 492 m should have delivered ~20 dB by the fit, and 412 m
