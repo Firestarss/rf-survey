@@ -902,6 +902,22 @@ window opens, so compression caused by an intermittent strong signal is invisibl
 it reported `linear` for the window in which all 124 phantoms appeared, and was right at
 the moment it looked.
 
+### Siting beats sensitivity
+
+The first real propagation data, 2026-08-27, is in `docs/phase_log.md` Phase 2: a
+5 W handheld at seven surveyed points, each identified by its own CTCSS so the
+deck's decode says which transmission it was. Path loss fits 28.9 dB per decade,
+normal urban clutter, and the chain is usable to about 1.1 km at `on_db` 10.
+
+The number that matters is not the range. **One building between transmitter and
+receiver cost more than 20 dB — more than quadrupling the deck's sensitivity
+would buy back.** 412 m delivered 21.2 dB and 492 m delivered nothing at all.
+
+So a single deck cannot be assumed to cover a site by radius, and the honest
+coverage claim is line-of-sight. Where the antenna stands at the festival will
+matter more than any threshold tuned on the bench — which is worth knowing
+before spending a deployment learning it.
+
 ### The next largest untested surface
 
 **Tone and DCS decoding beyond two tones, the tier ladder, and repeater pairing.** Two CTCSS tones have now been decoded off the air, but the DCS decoder, the

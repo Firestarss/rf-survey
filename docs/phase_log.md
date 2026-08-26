@@ -467,6 +467,70 @@ thresholds have never been tuned against real traffic — they were set from
 synthetic signals — and Phase 4 is where that happens. It is likely that the
 honest fix here is a threshold, not a thread.
 
+### 2026-08-27, evening: the first propagation data this project has
+
+A GMRS handheld at 5 W on 462.675, transmitted from seven surveyed points on a
+walk home, each with a different CTCSS so the deck's own decode identifies which
+transmission it was. Receiver at 42.3854086, -71.0796309, chain
+`NA-701 indoors -> Flamingo -> 10 dB -> 10 dB -> Airspy`, gain 42, 10 MSPS.
+
+| CTCSS | Code | Distance | SNR |
+|---|---|---|---|
+| 162.2 | 26 | 10 m | 66.5 dB |
+| 156.7 | 25 | 56 m | 53.3 dB |
+| 151.4 | 24 | 109 m | 37.4 dB |
+| 146.2 | 23 | 122 m | 38.9 dB |
+| 141.3 | 22 | 227 m | 29.5 dB |
+| 136.5 | 21 | 412 m | 21.2 dB |
+| 131.8 | 20 | **492 m** | **NOT HEARD** |
+
+**Six tones decoded correctly, capture ratio 0.71 to 1.0**, on live off-air
+signals from 21 to 66 dB SNR. Together with the 74.4 and 110.9 decoded earlier,
+that is eight distinct CTCSS tones identified correctly against a real
+transmitter. This is most of what Phase 3's first table asks for.
+
+**Path loss fits 28.9 dB per decade** — normal urban clutter, against 20 dB per
+decade for free space and 30-40 for dense urban. Extrapolated to `on_db` of
+10.0, the usable range of this chain is about **1.1 km**.
+
+**The gym transmission was obstruction, not range, and three earlier readings of
+it here were wrong.** 492 m should have delivered ~20 dB by the fit, and 412 m
+actually delivered 21.2 dB, so 80 m more should have cost 1.5 dB. It delivered
+nothing — a hole of more than 20 dB on that one path. The deck hears a 5 W
+handheld at 412 m perfectly well **with the 20 dB pad fitted**, so the pad was
+never why the gym failed. A building was.
+
+**The attenuation still matters, for a different reason.** At 28.9 dB/decade,
+recovering 20 dB of noise figure is 4.9x the range: ~1.1 km now, ~5.5 km with
+the 5 dB pad Phase 1 measured. Worth having, but it is not what silenced the gym.
+
+**Siting beats sensitivity, and that is the finding to carry to a festival.** One
+building cost more than quadrupling the deck's range would buy back. Where the
+antenna stands at the event will matter more than any threshold tuned on this
+bench. It also means a single deck cannot be assumed to cover a site: the honest
+coverage claim is line-of-sight, not radius.
+
+### A second phantom mechanism, still unhandled
+
+The closest transmission, at 66.5 dB, put skirts on neighbouring channels:
+
+```
+  462.6500   snr 17.7   CTCSS 162.2  cap 0.94     <- 25 kHz below
+  462.7063   snr 17.2   CTCSS 162.2  cap 0.94     <- 31 kHz above
+```
+
+They carry **the parent's tone at high confidence**, exactly like the odd
+harmonics, and are just as convincing in the database. But they are 25-31 kHz
+out, not odd multiples of the baseband offset, so the harmonic detector added
+this morning correctly does **not** flag them — they are adjacent-channel
+splatter from a very strong signal, a different mechanism.
+
+The detector's local-maximum rule covers +/-1 channel, which is 6.25 kHz, chosen
+because FRS primary and interstitial channels interleave at 12.5 kHz and a wider
+rule would discard real traffic. These land four and five channels out, well
+beyond it. Unsolved, and it only appears at SNRs above about 60 dB, which at a
+festival means anyone keying within a few tens of metres of the deck.
+
 ### Outstanding for Gate 2
 
 - [ ] Zero overflows for an hour at 10 MSPS — needs the threading or optimisation work
