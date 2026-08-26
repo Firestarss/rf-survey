@@ -491,8 +491,8 @@ signals from 21 to 66 dB SNR. Together with the 74.4 and 110.9 decoded earlier,
 that is eight distinct CTCSS tones identified correctly against a real
 transmitter. This is most of what Phase 3's first table asks for.
 
-**Coverage is a shape, not a radius.** Sorted by bearing rather than distance,
-the two later points turned a one-off into a pattern:
+**Corrected 2026-08-27 after checking the geometry — the first reading of this
+was wrong, and so was the second.** Sorted by bearing:
 
 | code | distance | bearing | residual vs fit |
 |---|---|---|---|
@@ -500,17 +500,31 @@ the two later points turned a one-off into a pattern:
 | 23 | 122 m | 41 N | +2.3 dB |
 | 22 | 227 m | 44 N | +1.2 dB |
 | 21 | 412 m | 99 E | +0.7 dB |
-| 28 | 209 m | 203 S | **-6.9 dB** |
+| 28 | 209 m | 203 S | -6.9 dB |
 | 27 | 86 m | 195 S | **not heard** |
 | 20 | 492 m | 114 ESE | **not heard** |
 
-Every north and east path fits within 2.3 dB. Both southerly paths are broken,
-and 27 was not heard at **86 m** while 109 m and 122 m returned 37 and 39 dB.
-Distance is not the weak variable here — direction is.
+The tempting reading — two dead bearings, coverage as a shape rather than a
+radius — does not survive the geometry. **27 and 28 are 8 degrees apart, the
+same line, and the FURTHER of the two is the one that got through**: nothing at
+86 m, +22.6 dB at 209 m. A directional null does not do that. And 27 and 20 are
+**82 degrees apart**, nearly a right angle, so they were never one pattern.
 
-Caveat kept deliberately: a missing transmission can always be a radio that did
-not key rather than a path that did not carry. 28 corroborates the southern hole
-at the same bearing, 6.9 dB down but audible. 20's miss stands more alone.
+What actually fits: **at short range the receiver's own building dominates.**
+The 86 m path crosses the whole house to reach a receiver sitting in an upstairs
+room; the 209 m path, further down the same street, arrives at the window on a
+different geometry and gets in. Distance is not the variable at that scale —
+walls are.
+
+**The gym miss at 492 m and 114 degrees remains unexplained.** It is on its own
+bearing, well clear of the house effect, and 21 at 99 degrees and 412 m came in
+at +0.7 dB against the fit. Either something specific blocks that path or that
+transmission did not happen as intended. Not resolved, and not worth a story.
+
+**A confound that runs through every number here: the antenna was indoors, in a
+room, for all of it.** A deployed deck with the antenna outside would produce a
+different map, and probably a much better one. These figures are a lower bound
+on what the hardware can do, not a measurement of it.
 
 **Path loss fits 30.5 dB per decade, R^2 = 0.937, residual sigma 3.8 dB** —
 normal urban clutter, against 20 dB per decade for free space and 30-40 for
