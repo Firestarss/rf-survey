@@ -155,11 +155,62 @@ Test frequencies are whole megahertz deliberately: US FM stations sit on **odd t
 station sits on the generator. In this metro that is not a precaution to skip — at
 gain 42 the bare cable picked up WBUR and WUMB at +58 to +70 dB.
 
+**Step 11 — antenna versus dummy, 2026-08-26. Measured, and the procedure is wrong.**
+
+Chain: `[antenna | dummy] -> Flamingo -> pads -> Airspy`, Nagoya NA-701 held vertical,
+Boston metro. The dummy figure is unchanged by attenuation, as it must be — a pad in
+front of a 50 ohm termination replaces one room-temperature resistor's noise with
+another's, so what is being measured is the receiver's own noise either way.
+
+| Pad | gain 39 antenna | gain 39 dummy | delta | gain 42 delta |
+|---|---|---|---|---|
+| 20 dB | -121.2 | -121.9 | **+0.7** | **+0.7** |
+| 10 dB | -117.1 | -121.7 | **+4.6** | **+4.8** |
+| 0 dB | -109.8 | -121.7 | **+11.9** | **+12.1** |
+
+**The delta does not change with gain, and the procedure says to set it with gain.**
+At 20 dB it reads +0.7 at gains 39, 42 and 45 — across a span that moves the noise floor
+by 20 dB. That is not measurement scatter, it is the physics: above the ADC knee the gain
+stages amplify the receiver's own noise and the antenna's equally, so the ratio is fixed.
+Below the knee the converter swamps both and the delta collapses to zero. There is no
+gain at which the ratio changes.
+
+So `bench-bringup.md` and `phase1-detail.md` are both wrong on this step. Gain only has
+to clear the knee — anywhere from 39 up. **What sets the delta is attenuation**, and
+20 dB of it was throwing away the sky.
+
+Fitting the three configurations gives external noise at **17.3x** the receiver's own
+noise power before attenuation (independent estimates 17.5, 19.5, 14.8 — spread +/-1.4 dB
+across a 12 dB range, so the model is sound):
+
+| pad | predicted delta |
+|---|---|
+| 3 dB | 9.9 dB |
+| 4 dB | 9.0 dB |
+| **5 dB** | **8.1 dB  <- fit this one** |
+| 10 dB | 4.4 dB |
+| 20 dB | 0.7 dB |
+
+**A 5 dB attenuator, not 20.** All of 3/4/5 satisfy the rule; the tiebreaker is the thing
+the rule does not capture — overload headroom when a handheld keys ten feet from the
+antenna. 5 dB keeps the most of it. It is also a single part rather than a stack, which
+halves the connector count and gives a cleaner A-versus-B match between the two receivers
+in step 10.
+
+Zero clipping was measured at every pad value and every gain up to 45, including bare
+antenna in Boston metro — **but with nothing keying nearby**, which is the case that
+actually decides this. Untested.
+
+This number is specific to the NA-701 at this bench. A festival site will differ, possibly
+a lot; the measurement takes fifteen minutes to repeat on site. The VHF receiver needs its
+own, and cannot inherit this one: different band, different antenna, and it rotates across
+446 / 146 / 155 MHz, which are three different noise environments.
+
 **Outstanding for Gate 1**
 
 - [x] Notch filter measured (step 9) — done 2026-08-26, PASS
 - [ ] Both 20 dB pads measured and labelled A/B, difference recorded (MiniSA, step 10)
-- [ ] Antenna-versus-dummy delta 8-10 dB — start at gain 36, not 12 (step 11)
+- [~] Antenna-versus-dummy measured (step 11) — 2026-08-26. Needs a 5 dB pad, on order
 - [x] ppm confirmed against the MiniSA generator (step 12) — done 2026-08-26
 - [ ] Everything in the spectrum accounted for (step 13)
 

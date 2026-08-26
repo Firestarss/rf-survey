@@ -417,11 +417,26 @@ Filters at this price are sometimes not what the label claims.
 
 ### Set the gain, once, properly
 
-1. Antenna off, dummy load on. Run `--spectrum`, note the `band reference level` line it
-   prints. Not a peak-list number — those are relative to it.
-2. Antenna on. Raise gain until that level rises 8–10 dB.
-3. Confirm the capture reports **zero clipping frames** while someone keys nearby.
-4. **Write the number down.** Standing setting.
+**Measured 2026-08-26 and this method does not work — see `phase1-detail.md` step 11 for
+the rewrite.** Gain does not control the 8–10 dB delta: above the ADC knee it amplifies the
+receiver's noise and the antenna's equally, so the ratio is fixed, and below the knee the
+converter swamps both. Measured at 20 dB of pad the delta read +0.7 dB at gain 39, 42 and
+45 alike.
+
+**Attenuation sets it.** Same bench: 20 dB pad gave +0.7 dB, 10 dB gave +4.7, none gave
++12.0.
+
+1. Set gain above the knee (~39–42 here) and leave it there.
+2. Dummy load at the far end of the chain, beyond filter and pads. Note the
+   `band reference level` line — not a peak-list number, those are relative to it.
+3. Antenna on, nothing else touched. Note it again.
+4. Delta under 8 dB → **remove attenuation**. Over 10 → **add** it.
+5. Confirm **zero clipping frames** while someone keys nearby. Clipping means add
+   attenuation, which pulls against step 4 — that trade is the real content of this step.
+6. **Write down gain and pad together.** Neither means anything without the other.
+
+This bench measured 5 dB, against the 20 dB the parts list assumes. The value does not
+transfer between sites, antennas or bands.
 
 Airspy gain splits across three stages, but **not** the way this line used to say. The
 SoapySDR module exposes an overall 0–45 dB filling LNA, then MIX, then VGA — there is no

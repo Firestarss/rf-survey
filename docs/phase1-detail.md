@@ -294,25 +294,59 @@ Do the same for the 10 dB pad if it ends up in the chain.
 
 ## Step 11 — set the gain, once
 
-The goal in plain terms: turn the gain up until the antenna's own noise is what you're
-hearing, rather than the receiver's — but not so far that a nearby radio overloads the thing.
-The number that tells you you're there is **8–10 dB**.
+The goal in plain terms: get to where the noise you hear is the sky's, not the receiver's
+own — but not so far that a nearby radio overloads the thing. The number that tells you
+you're there is **8–10 dB**.
 
-1. **Dummy load on.** Run `--spectrum` at gain 12. Note the band reference level. Call it
-   `N_dummy`. (You have this from step 6.)
-2. **Swap the dummy load for the antenna**, full chain, same gain. Run again. Call it `N_ant`.
-3. Compute `N_ant − N_dummy`.
+**Rewritten 2026-08-26 after measuring it. The original procedure set that number with
+gain, and gain does not control it.** Above the ADC knee the gain stages amplify the
+receiver's own noise and the antenna's equally, so the ratio between them is fixed:
+measured at 20 dB of pad, the delta read +0.7 dB at gain 39, +0.7 at 42 and +0.6 at 45 —
+across a span that moves the noise floor by 20 dB. Below the knee the converter swamps
+both and the delta collapses to zero. There is no gain at which the ratio changes.
+
+**Attenuation is what sets it.** Same bench, same antenna, gain fixed:
+
+| pad | delta |
+|---|---|
+| 20 dB | +0.7 dB |
+| 10 dB | +4.7 dB |
+| 0 dB | +12.0 dB |
+
+So:
+
+1. **Set the gain above the knee and leave it.** ~39–42 on this radio. Below ~36 the
+   converter's own noise dominates and nothing you do in front of the receiver shows up
+   at all — which is why the original "start at 12 and step up" could never have worked.
+2. **Dummy load at the far end of the chain** — beyond the filter and pads, not screwed
+   straight onto the radio, or you measure a different chain each time. Note the band
+   reference level. Call it `N_dummy`. It barely moves with attenuation: a pad in front
+   of a 50 Ω termination just swaps one room-temperature resistor's noise for another's.
+3. **Swap the dummy for the antenna**, nothing else touched. Call it `N_ant`.
+4. Compute `N_ant − N_dummy`.
    - **8–10 dB → done.**
-   - Less than 8 → raise gain one step, repeat from 1. Both numbers have to be re-measured at
-     the new gain.
-   - More than 10 → lower gain one step, repeat.
-4. At the final gain, have someone key a handheld nearby while a capture runs. **Confirm zero
-   clipping frames reported.** If it clips, you need more attenuation, not less gain — that's
-   what the 10 dB pad is for.
-5. **Write the number down.** This is a standing setting. Don't fiddle with it between runs or
-   nothing you log will be comparable.
+   - Less than 8 → **remove attenuation** and repeat.
+   - More than 10 → **add attenuation** and repeat.
+5. Measure two or three pad values rather than hunting one at a time. The relationship is
+   `delta = 10·log10(1 + r·10^(−pad/10))`, so two points fit `r` and the third checks it,
+   and then you solve for the pad you want instead of guessing. Measured in Boston with a
+   Nagoya NA-701, `r` came out 17.3× and the answer was a **5 dB** pad — not the 20 dB the
+   parts list assumes.
+6. At the final setting, have someone key a handheld nearby while a capture runs.
+   **Confirm zero clipping frames.** If it clips, add attenuation — and note that this
+   pulls against step 4, which is the real trade: 3, 4 and 5 dB all satisfied the rule
+   here, so pick the largest of them and keep the headroom.
+7. **Write both numbers down** — gain *and* pad. They are a standing pair; changing either
+   makes runs incomparable.
 
-**Corrected 2026-08-26, measured on the hardware.** This step used to say the driver
+**The pad value does not transfer.** It depends on the ambient noise where the deck is
+standing and on the antenna fitted. A festival site will differ from your bench, and the
+VHF receiver needs its own — it rotates across three bands with three different noise
+environments. The measurement takes fifteen minutes once you know the shape of it.
+
+---
+
+This step also used to say the driver
 exposes a "linearity" setting from 0 to 21. It does not. `soapysdr-module-airspy` exposes
 an overall **0–45 dB** which fills three stages *in sequence* — LNA 0–15, then MIX 0–15,
 then VGA 0–15:
