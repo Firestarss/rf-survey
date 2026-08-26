@@ -127,9 +127,37 @@ work during a survey.
 found without it: the device could not be opened at all, `--spectrum-seconds` ran for
 half its stated duration, and captures took 3.1 GB. All fixed; see handoff section 8.
 
+**Notch filter — Flamingo FM band-stop, measured 2026-08-26. PASS.**
+
+A tinySA cannot sweep its generator and measure the result at the same time; that is a
+tracking generator, and the two functions share hardware. The wiki's method needs two
+tinySAs. So the tinySA generated and **the deck itself measured** — which is worth
+noting as a capability, because it means the survey receiver can characterise its own
+front-end parts without any other instrument.
+
+Reference first, then the filter inserted, then subtract. Levels are absolute
+(`floor + SNR`), not a difference of SNRs: the floor estimate moved up to 1.9 dB between
+captures and subtracting SNRs directly would have credited that to the filter.
+
+| Frequency | Reference | With filter | Result | Want |
+|---|---|---|---|---|
+| 88.0 MHz | -76.0 dB | -119.6 dB | **43.6 dB rejection** | >= 30 |
+| 98.0 MHz | -76.0 dB | < -123.4 dB | **> 47.4 dB rejection** | >= 30 |
+| 108.0 MHz | -76.5 dB | -111.3 dB | **34.8 dB rejection** | >= 30 |
+| 466.0 MHz | -78.6 dB | -78.7 dB | **0.1 dB insertion loss** | <= 1.5 |
+
+98.0 MHz fell below the detection threshold entirely, so its figure is a bound rather
+than a value — measuring deeper needs more dynamic range than this setup has, since the
+gain must stay low to keep Boston broadcast out of the measurement.
+
+Test frequencies are whole megahertz deliberately: US FM stations sit on **odd tenths**
+(88.1, 88.3 ... 107.9), so 88.0 / 98.0 / 108.0 fall between channels and no Boston
+station sits on the generator. In this metro that is not a precaution to skip — at
+gain 42 the bare cable picked up WBUR and WUMB at +58 to +70 dB.
+
 **Outstanding for Gate 1**
 
-- [ ] Notch filter measured, ≥30 dB at 88-108 and ≤1.5 dB at 466 (MiniSA, step 9)
+- [x] Notch filter measured (step 9) — done 2026-08-26, PASS
 - [ ] Both 20 dB pads measured and labelled A/B, difference recorded (MiniSA, step 10)
 - [ ] Antenna-versus-dummy delta 8-10 dB — start at gain 36, not 12 (step 11)
 - [x] ppm confirmed against the MiniSA generator (step 12) — done 2026-08-26
