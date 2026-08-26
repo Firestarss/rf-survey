@@ -172,6 +172,70 @@ class RefinePeak(unittest.TestCase):
         self.assertIsNone(got)
 
 
+class SpectrumFloor(unittest.TestCase):
+    """The noise floor estimate: follow the passband, ignore the signals."""
+
+    def frames(self, floor, n=200):
+        """`n` frames of noise sitting on a given per-channel floor."""
+        rng = np.random.default_rng(0)
+        return floor + rng.normal(0.0, 0.7, size=(n, len(floor)))
+
+    def test_follows_the_passband_shape(self):
+        """A scalar floor called the receiver's own roll-off a signal.
+
+        At gain 42 the analog passband appears — rolled off at both edges, with
+        a raised shoulder near the top. A single median across the span sits
+        below the shoulder and above the skirts, so the shoulder reads as a
+        cluster of +6 dB channels that are not signals at all.
+        """
+        shape = np.concatenate([
+            np.linspace(-125.0, -112.0, 200),   # lower roll-off
+            np.full(1000, -112.0),              # flat middle
+            np.linspace(-112.0, -106.0, 200),   # raised shoulder
+            np.linspace(-106.0, -128.0, 194),   # upper roll-off
+        ])
+        got = proto.spectrum_floor(self.frames(shape))
+        self.assertLess(np.max(np.abs(got - shape)), 2.0,
+                        "floor does not track the passband")
+
+    def test_a_carrier_that_never_stops_stays_visible(self):
+        """The case the old band-wide reference existed to protect.
+
+        A repeater idling or a trunking control channel is present in every
+        frame, so a per-channel median over time absorbs it and it vanishes.
+        The median across frequency is what saves it: it is narrow, and its
+        neighbours are not.
+        """
+        floor = np.full(600, -112.0)
+        signal = floor.copy()
+        signal[300] = -70.0                     # on in every single frame
+        frames = self.frames(signal)
+        got = proto.spectrum_floor(frames)
+        self.assertLess(got[300], -105.0,
+                        "continuous carrier was absorbed into its own floor")
+        peaks = proto.find_peaks(frames.max(axis=0), got,
+                                 np.arange(600) * proto.CHANNEL_HZ)
+        self.assertIn(300, [int(round(f / proto.CHANNEL_HZ)) for f, _ in peaks])
+
+    def test_intermittent_signal_does_not_lift_the_floor(self):
+        floor = np.full(600, -112.0)
+        frames = self.frames(floor)
+        frames[:20, 300] = -60.0                # 10% duty, very strong
+        got = proto.spectrum_floor(frames)
+        self.assertLess(abs(got[300] - (-112.0)), 2.0)
+
+    def test_shoulder_stops_manufacturing_peaks(self):
+        """End to end: the shape alone must produce no entries."""
+        shape = np.concatenate([np.full(500, -112.0),
+                                np.full(100, -106.0),     # 6 dB shoulder
+                                np.full(494, -112.0)])
+        frames = self.frames(shape)
+        got = proto.spectrum_floor(frames)
+        peaks = proto.find_peaks(frames.max(axis=0), got,
+                                 np.arange(1094) * proto.CHANNEL_HZ)
+        self.assertEqual(peaks, [], f"shape alone produced {len(peaks)} peaks")
+
+
 class SpectrumOutput(unittest.TestCase):
     """What the bench operator actually reads off the terminal."""
 

@@ -62,6 +62,11 @@ FRAME_SECONDS = 0.013      # target analysis frame duration — see frame_size()
 FLOOR_FRAMES = 120         # frames of history kept for the background estimate
 FLOOR_PCTILE = 25          # low percentile tracks quiet without signal bias
 FLOOR_EVERY = 10           # recompute the background every Nth frame
+# Channels spanned by the frequency-domain median that estimates the noise floor
+# for --spectrum. 21 channels is 131 kHz: an order of magnitude wider than any
+# signal in this band, and an order of magnitude narrower than the passband
+# shape it has to follow. See spectrum_floor().
+FLOOR_MEDIAN_CHANNELS = 21
 # Analysis has three different dwell requirements, not one, so it has three
 # constants. Measured against synthetic signals by sweeping dwell (see
 # docs/handoff.md); every number below is the knee of a measured curve.
@@ -761,6 +766,36 @@ def device_args(driver, serial=None):
     return spec
 
 
+def spectrum_floor(chan_arr, width=FLOOR_MEDIAN_CHANNELS):
+    """Noise floor per channel: median over time, then median across frequency.
+
+    A single scalar for the whole span was enough while the receiver was
+    ADC-noise-limited, because the converter's noise is flat and so the floor
+    genuinely was one number. Raise the gain above the knee and the analog
+    passband appears — rolled off at both edges, with a raised shoulder near the
+    top — and a scalar floor then attributes that shape to signals. On the first
+    real capture at gain 42 it manufactured a cluster of +6 dB "channels" at
+    470.29-470.39 that were nothing but the shoulder, in the same list Gate 1
+    asks the operator to account for entry by entry.
+
+    Two medians, each rejecting a different thing:
+
+      over time       an intermittent signal occupies a minority of frames, so
+                      it does not move a channel's median however strong it is.
+      across frequency a signal that never stops survives the first median --
+                      that is the case the old band-wide reference existed to
+                      protect, a repeater idling or a trunking control channel
+                      becoming its own background. It cannot survive the second,
+                      because it is narrow and its neighbours are not.
+
+    What passes both is what varies slowly with frequency and is always there,
+    which is the definition wanted.
+    """
+    from scipy.ndimage import median_filter
+    per_channel = np.median(chan_arr, axis=0)
+    return median_filter(per_channel, size=width, mode="nearest")
+
+
 def find_peaks(power_db, floor_db, freqs_hz, top=25, min_snr=6.0):
     """Strongest channels above the background, as (freq_hz, snr_db) pairs.
 
@@ -832,7 +867,8 @@ def refine_peak_hz(spec_db, base_hz, bin_hz, target_hz, search_hz=CHANNEL_HZ):
 WATERFALL_ROWS = 1500
 
 
-def render_spectrum(peak_db, avg_db, waterfall, center, rate, path, title):
+def render_spectrum(peak_db, avg_db, waterfall, center, rate, path, title,
+                    floor_db=None, floor_freqs_hz=None):
     """Write an averaged spectrum and waterfall to a PNG. No display needed.
 
     Takes the peak and average traces already accumulated rather than a stack of
@@ -859,6 +895,14 @@ def render_spectrum(peak_db, avg_db, waterfall, center, rate, path, title):
     x = np.linspace(mhz_lo, mhz_hi, len(peak_db))
     ax1.plot(x, peak_db, lw=0.6, alpha=0.5, label="peak hold")
     ax1.plot(x, avg_db, lw=0.8, label="average")
+    # The floor every peak is measured against. Drawn because Gate 1 asks the
+    # operator to account for each entry in the peak list, and half of that job
+    # is seeing what the entry was judged against — the passband is not flat and
+    # eyeballing a single number against a sloped floor is how the roll-off got
+    # read as signal in the first place.
+    if floor_db is not None and floor_freqs_hz is not None:
+        ax1.plot(np.asarray(floor_freqs_hz) / 1e6, floor_db, lw=0.9,
+                 color="crimson", alpha=0.8, label="noise floor")
     ax1.set_ylabel("dB")
     ax1.legend(loc="upper right", fontsize=8)
     ax1.grid(alpha=0.3)
@@ -988,15 +1032,9 @@ def spectrum_capture(args):
 
     chan_arr = np.asarray(chan_db)
 
-    # For a snapshot, the reference must be the typical level ACROSS the band,
-    # not a rolling percentile over time. The time-based estimate used by the
-    # live detector deliberately absorbs anything continuously present — good
-    # for spotting key-ups, useless here, because a carrier that never stops
-    # (a repeater idling, a stuck transmitter, a trunking control channel)
-    # becomes part of its own background and vanishes.
-    floor_db = float(np.median(np.median(chan_arr, axis=0)))
-    peaks = find_peaks(chan_arr.max(axis=0),
-                       np.full(grid.n, floor_db), grid.freqs_hz)
+    floor_curve = spectrum_floor(chan_arr)
+    floor_db = float(np.median(floor_curve))
+    peaks = find_peaks(chan_arr.max(axis=0), floor_curve, grid.freqs_hz)
 
     # Full-resolution peak hold, for the sub-bin frequency estimate. The channel
     # grid is what names a signal; this is what measures one.
@@ -1009,7 +1047,8 @@ def spectrum_capture(args):
     title = (f"{center/1e6:.3f} MHz  {rate/1e6:.1f} MSPS  gain {args.gain}"
              f"   {actual_s:.0f} s   {time.strftime('%Y-%m-%d %H:%M')}")
     if render_spectrum(spec_peak, spec_avg, waterfall, center, rate,
-                       args.spectrum, title):
+                       args.spectrum, title,
+                       floor_db=floor_curve, floor_freqs_hz=grid.freqs_hz):
         print(f"wrote {args.spectrum}")
 
     print(f"\n  span {(center-rate/2)/1e6:.3f} - {(center+rate/2)/1e6:.3f} MHz")
@@ -1018,7 +1057,8 @@ def spectrum_capture(args):
     # dummy load. The peaks below are quoted RELATIVE to it, so without it
     # printed the absolute level appeared nowhere in the output at all.
     print(f"  band reference level {floor_db:7.1f} dB   "
-          f"(median over {grid.n} channels)")
+          f"(median of the floor curve over {grid.n} channels; "
+          f"span {floor_curve.min():.1f} to {floor_curve.max():.1f})")
     print(f"  overflows {overflows}   clipping frames {clipped}")
     if clipped:
         print("  ** CLIPPING — add attenuation or reduce gain")
