@@ -206,6 +206,52 @@ a lot; the measurement takes fifteen minutes to repeat on site. The VHF receiver
 own, and cannot inherit this one: different band, different antenna, and it rotates across
 446 / 146 / 155 MHz, which are three different noise environments.
 
+**Per-band attenuation model, measured 2026-08-26.** Nagoya NA-701, bare (no pad),
+Flamingo in line, Boston metro, antenna propped vertical indoors.
+
+Every delta below comes from a gain **verified linear by a compression sweep** — the floor
+must rise ~10 dB per 3 gain steps, and where it does not, the reading is discarded.
+
+| Band | delta | external/receiver | pad for 8-10 dB |
+|---|---|---|---|
+| 146 MHz (2 m) | 26.7 dB | 467x | **17-19 dB** |
+| 155 MHz (MURS/VHF business) | — | — | **not measurable, see below** |
+| 446 MHz (70 cm ham) | 12.9 dB | 18x | **3-5 dB** |
+| 466 MHz (UHF business) | 13.5 dB | 21x | **4-6 dB** |
+
+**Gain compression is real at VHF and it is silent.** At 146 MHz bare, the floor rises
++10.4 dB (33->36) and +10.2 (36->39), then only +6.2 (39->42) and +2.5 (42->45). Gain 39
+is the last honest point: above the ADC knee, below compression. **Clipping frames read
+zero throughout** — compression happens well before hard clipping, so the deck's existing
+overload detection does not catch it. Every VHF reading taken at gain 42 earlier in the
+session was compressed, which is what made the delta look gain-dependent.
+
+**155 MHz cannot be characterised while paging is active.** The band holds a transmitter
+at **152.600 MHz reading +55.4 dB**, 14 dB above anything else, plus more paging at 151.93
+and 152.40 and a marine VHF cluster at 156.1-156.26 (Boston Harbor). Paging runs hundreds
+of watts to kilowatts in bursts, so the front end is driven into compression intermittently
+and the noise floor is not stationary between captures — measured floors of -108.6, -103.7,
+-91.0 and -103.8 at successive gains, including a **12.8 dB fall for a 3 dB gain increase**,
+which is not physically possible in a static environment. Fit 20 dB to linearise it, then
+re-measure.
+
+**The two receivers need very different attenuation, and `vhf` as configured cannot be
+satisfied by any single value.** It rotates across 146, 155 and 446, which want roughly
+18, 20 and 4 dB. Fitting 20 dB over-attenuates 446 by 16 dB, dropping its delta to ~1 dB
+and losing weak 70 cm signals; fitting 5 dB compresses 146 and 155, which is a hard failure
+that produces silently wrong data with no warning. **Take the 20 dB** — a sensitivity loss
+is recoverable, invalid data is not. The better fix is architectural: 446 wants the same
+4-5 dB as 466 and arguably belongs on the UHF receiver rather than grouped with the two
+VHF windows. Not changed here; that is an architecture decision.
+
+The original parts list assumed 20 dB for both radios. Right for VHF, four times too much
+for UHF.
+
+**Caveat on the 146 figure:** the antenna was propped on a computer desk, inside its near
+field, and PCs are noisy at VHF. Some of that 467x may be the desktop rather than Boston.
+Worth one check with the antenna elsewhere before buying on it — though the deployed deck
+also sits beside a computer, so it is not unrepresentative.
+
 **Outstanding for Gate 1**
 
 - [x] Notch filter measured (step 9) — done 2026-08-26, PASS

@@ -39,7 +39,11 @@ receivers:
     # Applied to the tune request, not via setFrequencyCorrection: SoapyAirspy
     # reports hasFrequencyCorrection() == False and silently ignores it.
     ppm: 0.64
-    attenuator_db: 20             # 2x 10 dB stacked until the 20 dB pads arrive
+    # MEASURED TARGET 5 dB, not 20. Phase 1 step 11, 2026-08-26: external noise
+    # here is 21x the receiver's own, so 20 dB leaves an antenna-vs-dummy delta
+    # of 0.7 dB where 8-10 is wanted. Currently 2x 10 dB stacked because that is
+    # what is on hand; fit a single 5 dB pad when the kit arrives.
+    attenuator_db: 20
     antenna: null                 # TODO: record what is actually screwed on
     usb_bus: 4                    # Bus 004 Port 1, xhci-hcd, 480M. vhf must not
                                   # land on this one — confirm with lsusb -t
@@ -51,6 +55,16 @@ receivers:
     sample_rate: 10_000_000
     gain: 12                      # TODO Phase 5
     ppm: 0.0                      # TODO Phase 5
+    # MEASURED TARGET 20 dB, and unlike uhf this one is right. Phase 1, 2026-08-26:
+    # 146 MHz needs 17-19 dB (external noise 467x the receiver's own) and 155 MHz
+    # could not be measured at all because a paging transmitter at 152.600 MHz,
+    # +55.4 dB, drives the front end into compression intermittently.
+    #
+    # KNOWN UNSATISFIABLE AS CONFIGURED: the three windows below want roughly
+    # 18, 20 and 4 dB. 20 dB over-attenuates the 446 window by 16 dB and loses
+    # weak 70 cm signals; less compresses 146 and 155, which fails silently -
+    # clipping frames read zero right through compression. Taking the 20.
+    # 446 wants the same 4-5 dB as uhf and may belong on that receiver instead.
     attenuator_db: 20
     antenna: null
     usb_bus: null
