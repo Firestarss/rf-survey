@@ -489,9 +489,19 @@ and you need more attenuation.
 ```bash
 python3 src/survey_prototype.py \
   --driver airspy --serial <SERIAL> \
-  --freq 466.0e6 --rate 10e6 --gain 12 \
-  --ppm <MEASURED> --db data/survey.sqlite --receiver-id uhf --stats
+  --freq 466.0e6 --rate 10e6 --gain 42 \
+  --ppm 0.64 --db data/survey.sqlite --receiver-id uhf --stats
 ```
+
+`--freq` parks the receiver, overriding the profile's rotation — which is what you want
+here, because this gate is about whether detection and logging are correct, and a retune
+mid-test only adds a variable. Gain 42 and ppm 0.64 are the Phase 1 measurements for
+radio 1; at the profile's provisional gain of 12 the receiver is ADC-noise-limited and a
+handheld ten feet away reads 9.6 dB instead of 48.6.
+
+**Use a scratch database, not the shipped one.** `data/survey.sqlite` normally holds the
+synthetic fixture scenario, and mixing invented events with real ones makes both useless.
+`--db data/phase2.sqlite` costs nothing and keeps the fixtures intact for the test suite.
 
 Run it under `tmux` or `screen` so it survives your SSH session dropping:
 
@@ -525,8 +535,11 @@ sqlite3 data/survey.sqlite "SELECT freq_hz/1e6, duration_s, snr_db, deviation_hz
 | CPU across four cores | under 40% |
 | Temperature | under 70 °C |
 
-**This CPU number decides whether the second radio is worth buying.** On Lite there's no
-desktop to skew it — just `htop` in another SSH session.
+**This CPU number decides whether two radios fit on this machine.** Both were bought on
+2026-08-25, so the question is no longer whether to spend the money but whether the Pi can
+carry them — and if one radio at 10 MSPS is already near 40%, the answer is to optimise or
+move to a Radxa X4 before Phase 6. Phase 0 projected about 14% of the machine for two, so
+there should be room. Just `htop` in another SSH session.
 
 **Come back to me after this gate whether it passes or not.** If one radio at 10 MSPS is
 already near 40%, two won't fit and we should optimise or move to the Radxa X4 before you
