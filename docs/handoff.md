@@ -37,6 +37,8 @@ src/cli.py                the two lines every command-line entry point shares
 tools/seed_band_plan.py   FRS/GMRS/MURS/Part 90 channels + ARRL ham segments
 tools/make_fixtures.py    deterministic synthetic festival scenario
 tools/deck-check.sh       soak and diagnostics
+tools/fieldsurvey.py      walk a site, fit path loss from CTCSS-tagged transmissions
+tools/padcal.py           measure the attenuation this site and antenna want
 profiles/festival.yaml    receiver assignments, detection thresholds, operator licences
 systemd/                  unit file and deployment notes for unattended running
 docs/phase_log.md         gate tracker. Phase 0 PASS.

@@ -39,6 +39,12 @@ python3 src/survey_prototype.py --selftest              # sizing and speed, no h
 bash tools/run-tests.sh                                # correctness: 222 tests
 bash tools/deck-check.sh diag                          # diagnostics
 
+# Field instruments — see docs/tools.md
+python3 tools/padcal.py --serial <S> --freq 466.0e6 --pad 20    # what pad this site wants
+python3 tools/fieldsurvey.py list --db data/survey.sqlite       # did it hear me?
+python3 tools/fieldsurvey.py fit  --db data/survey.sqlite \
+        --freq 462.675e6 --rx LAT,LON --points walk.csv         # fit path loss
+
 # Look at a band without a monitor. Needs a radio; writes a PNG and prints the
 # strongest channels, each with a measured frequency and the receiver's clock
 # error against it.
