@@ -20,9 +20,21 @@ receivers:
     # A serial that matches nothing is refused rather than opening whatever is
     # attached — which is what makes addressing by serial worth doing.
     serial: 637862dc2e4c6dd7
-    mode: parked
-    center_hz: 466_000_000        # covers 461–471: all FRS, GMRS, UHF dots and stars
+    # Was parked on 466. Now rotating, because Phase 1 measured what attenuation
+    # each band needs and 446 turned out to belong here: 446 and 466 both want
+    # 4-5 dB, while 146 and 155 want 17-20 dB. Grouping by required attenuation
+    # rather than by "ham vs business" is what lets each radio have ONE correct
+    # pad. See docs/phase_log.md, Phase 1, per-band attenuation model.
+    mode: rotating
+    dwell_seconds: 60             # fallback; every window below sets its own
     sample_rate: 10_000_000
+    windows:
+      # Dwell is deliberately lopsided. 466 is the band this survey exists for —
+      # all of FRS, GMRS and the UHF business pool — and 446 is a ham segment
+      # that is worth sampling rather than watching. Splitting the time evenly
+      # would halve coverage of the main band to gain little.
+      - {center_hz: 466_000_000, label: "FRS/GMRS/UHF business", dwell_seconds: 300}
+      - {center_hz: 446_000_000, label: "70cm ham", dwell_seconds: 60}
     # STILL PROVISIONAL and known to be too low — step 11 sets it, and step 11
     # needs the antenna. Measured 2026-08-26: this is an overall 0-45 dB filling
     # LNA, then MIX, then VGA, and the receiver is ADC-noise-limited below ~36,
@@ -39,10 +51,12 @@ receivers:
     # Applied to the tune request, not via setFrequencyCorrection: SoapyAirspy
     # reports hasFrequencyCorrection() == False and silently ignores it.
     ppm: 0.64
-    # MEASURED TARGET 5 dB, not 20. Phase 1 step 11, 2026-08-26: external noise
-    # here is 21x the receiver's own, so 20 dB leaves an antenna-vs-dummy delta
-    # of 0.7 dB where 8-10 is wanted. Currently 2x 10 dB stacked because that is
-    # what is on hand; fit a single 5 dB pad when the kit arrives.
+    # MEASURED TARGET 5 dB, not 20. Phase 1 step 11, 2026-08-26. Both windows on
+    # this receiver agree, which is why they are grouped here: 466 measured 21x
+    # external-to-receiver noise (wants 4-6 dB) and 446 measured 18x (wants
+    # 3-5 dB). 20 dB leaves an antenna-vs-dummy delta of 0.7 dB where 8-10 is
+    # wanted. Currently 2x 10 dB stacked because that is what is on hand; fit a
+    # single 5 dB pad when the kit arrives.
     attenuator_db: 20
     antenna: null                 # TODO: record what is actually screwed on
     usb_bus: 4                    # Bus 004 Port 1, xhci-hcd, 480M. vhf must not
@@ -60,21 +74,30 @@ receivers:
     # could not be measured at all because a paging transmitter at 152.600 MHz,
     # +55.4 dB, drives the front end into compression intermittently.
     #
-    # KNOWN UNSATISFIABLE AS CONFIGURED: the three windows below want roughly
-    # 18, 20 and 4 dB. 20 dB over-attenuates the 446 window by 16 dB and loses
-    # weak 70 cm signals; less compresses 146 and 155, which fails silently -
-    # clipping frames read zero right through compression. Taking the 20.
-    # 446 wants the same 4-5 dB as uhf and may belong on that receiver instead.
+    # RESOLVED 2026-08-26 by moving 446 to the uhf receiver. This was previously
+    # unsatisfiable: three windows wanting 18, 20 and 4 dB cannot share one pad.
+    # 20 dB would have over-attenuated 446 by 16 dB and lost weak 70 cm signals;
+    # less would have compressed 146 and 155, which fails silently - clipping
+    # frames read zero right through compression. Both remaining windows want
+    # 17-20 dB, so one pad now serves them.
     attenuator_db: 20
     antenna: null
     usb_bus: null
     windows:
-      - {center_hz: 446_000_000, label: "70cm ham"}
+      # 446 moved to the uhf receiver on 2026-08-26. It wants 4-5 dB of
+      # attenuation and these two want 17-20 dB; no single pad served all three,
+      # and under-attenuating VHF compresses the front end silently.
       - {center_hz: 146_000_000, label: "2m ham"}
       # 154.950 is the midpoint of 151.505–158.400, the full span of VHF business
       # and MURS channels. Covers all 14 even at a conservative 8.5 MHz usable
       # bandwidth, with 800 kHz of edge margin. Nothing sits on the centre itself.
       # Was 153.200, which missed the 158.400 itinerant by 200 kHz.
+      #
+      # Phase 1 found a paging transmitter at 152.600 reading +55.4 dB in this
+      # span, 14 dB above everything else, driving the front end in and out of
+      # compression between captures. The linearity check runs on every window
+      # and will flag it; treat data from this window as suspect until a pad has
+      # been fitted and the check reads linear.
       - {center_hz: 154_950_000, label: "MURS + VHF business"}
 
 # Thresholds below are set from synthetic signals and are provisional.

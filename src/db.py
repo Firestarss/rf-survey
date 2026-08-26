@@ -24,7 +24,7 @@ import time
 
 import migrate
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SCHEMA_PATH = pathlib.Path(__file__).with_name("schema_v2.sql")
 
 
@@ -138,6 +138,13 @@ def register_receiver(db: sqlite3.Connection, run_id: int, receiver_id: str,
          *(kw.get(f) for f in fields)),
     )
     return cur.lastrowid
+
+
+def set_window_linearity(db: sqlite3.Connection, window_id: int,
+                         verdict: str) -> None:
+    """Record whether the front end was linear while this window was open."""
+    db.execute("UPDATE coverage_windows SET gain_linear = ? WHERE id = ?",
+               (verdict, window_id))
 
 
 def open_window(db: sqlite3.Connection, run_id: int, receiver_id: str,

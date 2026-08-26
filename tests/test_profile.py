@@ -17,22 +17,43 @@ from survey_prototype import load_receiver_config
 class TestRealProfile(unittest.TestCase):
     """Against profiles/festival.yaml as it actually ships."""
 
-    def test_uhf_is_parked_on_one_window(self):
+    def test_receivers_are_grouped_by_required_attenuation(self):
+        """446 sits with 466, not with the VHF windows.
+
+        Phase 1 measured what each band needs: 446 and 466 want 4-5 dB, 146 and
+        155 want 17-20 dB. Grouped the old way — ham with ham, business with
+        business — no single pad could serve the vhf receiver, and the failure
+        mode of under-attenuating it is silent front-end compression rather than
+        anything the overload counters report.
+        """
+        uhf = load_receiver_config(str(PROFILE), "uhf")
+        vhf = load_receiver_config(str(PROFILE), "vhf")
+        self.assertEqual({w["center_hz"] for w in uhf["windows"]},
+                         {466_000_000, 446_000_000})
+        self.assertEqual({w["center_hz"] for w in vhf["windows"]},
+                         {146_000_000, 154_950_000})
+
+    def test_uhf_rotates_with_lopsided_dwell(self):
+        """466 is the band the survey is for; 446 is sampled, not watched."""
         cfg = load_receiver_config(str(PROFILE), "uhf")
-        self.assertEqual(cfg["mode"], "parked")
-        self.assertEqual(len(cfg["windows"]), 1)
-        self.assertEqual(cfg["windows"][0]["center_hz"], 466_000_000)
+        self.assertEqual(cfg["mode"], "rotating")
+        dwell = {w["center_hz"]: w["dwell_s"] for w in cfg["windows"]}
+        self.assertEqual(dwell[466_000_000], 300.0)
+        self.assertEqual(dwell[446_000_000], 60.0)
+        self.assertGreater(dwell[466_000_000], dwell[446_000_000],
+                           "the main band must not lose time to the ham segment")
 
     def test_vhf_rotates_through_every_window(self):
-        # The profile has specified three windows and a dwell since it was
-        # written, and nothing implemented it: the receiver parked on whatever
-        # --freq said and two thirds of its coverage was never listened to.
         cfg = load_receiver_config(str(PROFILE), "vhf")
         self.assertEqual(cfg["mode"], "rotating")
-        self.assertEqual(len(cfg["windows"]), 3)
+        self.assertEqual(len(cfg["windows"]), 2)
         self.assertEqual(cfg["dwell_seconds"], 180.0)
-        centers = {w["center_hz"] for w in cfg["windows"]}
-        self.assertEqual(centers, {446_000_000, 146_000_000, 154_950_000})
+
+    def test_windows_without_dwell_fall_back_to_the_receiver(self):
+        cfg = load_receiver_config(str(PROFILE), "vhf")
+        for w in cfg["windows"]:
+            self.assertIsNone(w["dwell_s"],
+                              "vhf windows should inherit the receiver dwell")
 
     def test_underscored_numbers_parse_as_numbers(self):
         # The profile uses 466_000_000. That is YAML 1.1 behaviour; under a 1.2

@@ -285,8 +285,10 @@ class TestParkedRun(CaptureRunCase):
 class TestRotation(CaptureRunCase):
     """A rotating receiver must visit every window and say what it heard where."""
 
-    WINDOWS = {"70cm ham": 446_000_000, "2m ham": 146_000_000,
-               "MURS + VHF business": 154_950_000}
+    # 446 moved to the uhf receiver on 2026-08-26 — it wants 4-5 dB of
+    # attenuation where these two want 17-20, and one receiver can carry only
+    # one pad.
+    WINDOWS = {"2m ham": 146_000_000, "MURS + VHF business": 154_950_000}
 
     @classmethod
     def scenario_fn(cls):

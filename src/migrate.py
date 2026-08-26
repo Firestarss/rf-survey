@@ -314,6 +314,48 @@ MIGRATIONS: dict[int, list[str]] = {
            ORDER BY w.receiver_id, w.center_hz""",
     ],
 
+    9: [
+        # Whether the front end was still linear on this window.
+        #
+        # Measured on hardware 2026-08-26: at 146 MHz on a bare antenna in Boston
+        # the noise floor rises +10.4 dB and +10.2 dB across the first two gain
+        # steps, then only +6.2 and +2.5. That is the front end compressing, and
+        # `overload` does NOT catch it — clipping frames read zero right through,
+        # because compression happens well before samples reach full scale. The
+        # deck therefore had a failure mode that produced confident, wrong
+        # numbers with every existing indicator clean.
+        #
+        # It has to be per window, not per run, because it depends on what is on
+        # the air in the band being listened to: the same receiver at the same
+        # gain was linear at 466 MHz and compressed at 146 MHz minutes apart.
+        # A rotating receiver can be sound on one window and not on the next.
+        "ALTER TABLE coverage_windows ADD COLUMN gain_linear TEXT "
+        "CHECK (gain_linear IN ('linear','compressed','inconclusive','unchecked'))",
+
+        # Surfaced in the view because a coverage figure that does not say the
+        # band was compressed is the same clean-looking log full of junk that
+        # OverloadMonitor exists to prevent.
+        "DROP VIEW IF EXISTS v_coverage",
+        """CREATE VIEW v_coverage AS
+           SELECT w.receiver_id,
+                  COALESCE(w.label, printf('%.3f MHz', w.center_hz / 1e6)) AS window,
+                  printf('%.3f', w.center_hz / 1e6)      AS center_mhz,
+                  printf('%.1f', w.sample_rate_hz / 1e6) AS span_mhz,
+                  COUNT(DISTINCT w.id)                   AS visits,
+                  printf('%.0f', SUM(COALESCE(w.t_end, w.t_start) - w.t_start))
+                                                         AS listened_s,
+                  COALESCE(MIN(w.gain_linear), 'unchecked') AS front_end,
+                  (SELECT COUNT(*) FROM events e
+                    WHERE e.window_id IN (
+                        SELECT id FROM coverage_windows x
+                         WHERE x.run_id = w.run_id
+                           AND x.receiver_id = w.receiver_id
+                           AND x.center_hz = w.center_hz)) AS events
+           FROM coverage_windows w
+           GROUP BY w.run_id, w.receiver_id, w.center_hz
+           ORDER BY w.receiver_id, w.center_hz""",
+    ],
+
     8: [
         # Which window heard this event, as a fact rather than an inference.
         #

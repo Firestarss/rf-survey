@@ -67,6 +67,16 @@ FLOOR_EVERY = 10           # recompute the background every Nth frame
 # signal in this band, and an order of magnitude narrower than the passband
 # shape it has to follow. See spectrum_floor().
 FLOOR_MEDIAN_CHANNELS = 21
+
+# Front-end linearity check. Three gain settings, `COMPRESSION_GAIN_STEP` apart,
+# and the two increments must agree: a linear receiver moves its noise floor by
+# the same amount for each equal step down. Self-calibrating, which matters
+# because the Airspy's "dB" of gain are index steps and three of them move the
+# floor about 10 dB, not 3 — so an absolute expectation would be device lore.
+COMPRESSION_GAIN_STEP = 3.0
+COMPRESSION_MIN_RISE_DB = 2.0   # below this the lower pair says nothing usable
+COMPRESSION_RATIO = 0.7         # top step this far under the lower one = squashed
+COMPRESSION_SECONDS = 0.5       # per gain point
 # Analysis has three different dwell requirements, not one, so it has three
 # constants. Measured against synthetic signals by sweeping dwell (see
 # docs/handoff.md); every number below is the knee of a measured curve.
@@ -831,6 +841,39 @@ def true_center_hz(requested_hz, ppm):
     return requested_hz * (1.0 + ppm * 1e-6)
 
 
+def compression_verdict(levels, min_rise_db=COMPRESSION_MIN_RISE_DB,
+                        ratio=COMPRESSION_RATIO):
+    """Is the front end still linear? `levels` is three dB readings, low gain first.
+
+    A linear receiver raises its noise floor by the same amount for each equal
+    step of gain. When the front end starts compressing, the top step delivers
+    less than the one below it. Comparing the two increments rather than either
+    one against an expectation makes this self-calibrating: it needs no idea of
+    what a gain unit is worth, which is essential because on this Airspy three
+    units of "dB" move the floor about ten.
+
+    Measured on hardware, 2026-08-26, bare antenna in Boston:
+
+        146 MHz   +10.4, +10.2, +6.2, +2.5   compressing above gain 39
+        466 MHz   +10.0, +10.0, +10.0        linear throughout
+
+    Returns 'linear', 'compressed', or 'inconclusive'. The last is not a
+    failure: below the ADC knee neither step moves the floor, so there is
+    nothing to compare and saying so is the honest answer.
+
+    This is the one overload mode `OverloadMonitor` cannot see. Compression
+    happens well before samples reach full scale, so clipping frames read zero
+    right through it, and desense looks for the floor going UP together — while
+    compression makes it fail to rise. Every indicator stays clean while the
+    numbers go wrong.
+    """
+    lo, mid, hi = (float(x) for x in levels)
+    first, second = mid - lo, hi - mid
+    if first < min_rise_db:
+        return "inconclusive"
+    return "compressed" if second < ratio * first else "linear"
+
+
 def find_peaks(power_db, floor_db, freqs_hz, top=25, min_snr=6.0):
     """Strongest channels above the background, as (freq_hz, snr_db) pairs.
 
@@ -1436,14 +1479,22 @@ def load_receiver_config(profile_path, receiver_id):
 
     mode = rx.get("mode", "parked")
     if mode == "rotating":
-        windows = [dict(center_hz=int(w["center_hz"]), label=w.get("label"))
+        # dwell_seconds is per window, falling back to the receiver's. Equal
+        # dwell is wrong whenever the windows are not equally interesting: the
+        # uhf receiver covers the whole FRS/GMRS band on one window and a ham
+        # segment on the other, and splitting its time evenly would halve
+        # coverage of the band the survey is actually for.
+        windows = [dict(center_hz=int(w["center_hz"]), label=w.get("label"),
+                        dwell_s=float(w["dwell_seconds"])
+                        if w.get("dwell_seconds") else None)
                    for w in (rx.get("windows") or [])]
         if not windows:
             raise SystemExit(f"receiver {receiver_id} is rotating with no windows")
     else:
         if rx.get("center_hz") is None:
             raise SystemExit(f"receiver {receiver_id} is parked with no center_hz")
-        windows = [dict(center_hz=int(rx["center_hz"]), label=rx.get("label"))]
+        windows = [dict(center_hz=int(rx["center_hz"]), label=rx.get("label"),
+                        dwell_s=None)]
 
     det = (prof.get("detection") or {})
     return {
@@ -1495,10 +1546,22 @@ def resolve_settings(args):
     cfg["serial_want"] = args.serial or cfg["serial"]
 
     if args.freq is not None:                       # explicit override parks it
-        cfg["windows"] = [dict(center_hz=int(args.freq), label="--freq")]
-    if len(cfg["windows"]) > 1 and not cfg["dwell_s"]:
-        raise SystemExit(f"receiver {args.receiver_id} has {len(cfg['windows'])} "
-                         f"windows but no dwell_seconds — it would never rotate")
+        cfg["windows"] = [dict(center_hz=int(args.freq), label="--freq",
+                               dwell_s=None)]
+    # --dwell-seconds is an operator override and beats per-window values, so
+    # `--simulate 8 --dwell-seconds 6` still exercises rotation quickly.
+    if cfg["dwell_s"] and args.dwell_seconds is not None:
+        for w in cfg["windows"]:
+            w["dwell_s"] = None
+    if len(cfg["windows"]) > 1:
+        missing = [w for w in cfg["windows"]
+                   if not w["dwell_s"] and not cfg["dwell_s"]]
+        if missing:
+            raise SystemExit(
+                f"receiver {args.receiver_id} has {len(cfg['windows'])} windows "
+                f"but no dwell_seconds on "
+                f"{', '.join(w['label'] or str(w['center_hz']) for w in missing)} "
+                f"and none on the receiver — it would never rotate")
     return cfg
 
 
@@ -1530,6 +1593,8 @@ class Radio:
         # Held on the radio because every tune has to apply it, not just the
         # first one: a rotating receiver retunes on every dwell.
         self.ppm = float(settings.get("ppm") or 0.0)
+        self.rate_hint = float(settings.get("rate") or settings.get("sample_rate")
+                               or 10e6)
         self.RX = self.api.SOAPY_SDR_RX
         self.OVERFLOW = self.api.SOAPY_SDR_OVERFLOW
         self._cf32 = self.api.SOAPY_SDR_CF32
@@ -1576,6 +1641,51 @@ class Radio:
     def read(self, buf, n):
         """Samples into `buf`. Returns the count, or <= 0 for a timeout."""
         return self.dev.readStream(self.stream, [buf], n, timeoutUs=2_000_000).ret
+
+    def set_gain(self, gain):
+        self.dev.setGain(self.RX, 0, float(gain))
+
+    def linearity(self, grid, periodogram, frame, gain,
+                  step=COMPRESSION_GAIN_STEP, seconds=COMPRESSION_SECONDS):
+        """Check the front end is still linear at `gain`, and restore it.
+
+        Steps the gain down twice and watches whether the noise floor falls by
+        the same amount each time. Runs on the open stream, so it costs about
+        `3 * seconds` and no retune. Called once per window because the answer
+        depends on what is on the air in the band being listened to — the same
+        receiver at the same gain measured linear at 466 MHz and compressed at
+        146 MHz minutes apart.
+
+        Restores the configured gain in a finally, because leaving a survey
+        running at two thirds of its intended gain would be a far worse bug than
+        the one this exists to catch.
+        """
+        gains = [gain - 2 * step, gain - step, gain]
+        if min(gains) < 0:
+            return "inconclusive"
+        levels = []
+        try:
+            for g in gains:
+                self.set_gain(g)
+                # The first read after a gain change still holds samples taken
+                # at the old setting; the driver's buffers do not flush.
+                self.read(frame, len(frame))
+                lvl = []
+                need = max(1, int(seconds * self.rate_hint / len(frame)))
+                for _ in range(need):
+                    n = self.read(frame, len(frame))
+                    if n <= 0:
+                        continue
+                    psd = periodogram(frame[:n])
+                    if psd is None:
+                        continue
+                    lvl.append(float(np.median(to_db(grid.power(psd)))))
+                if not lvl:
+                    return "inconclusive"
+                levels.append(float(np.median(lvl)))
+        finally:
+            self.set_gain(gain)
+        return compression_verdict(levels)
 
     def stop(self):
         self.dev.deactivateStream(self.stream)
@@ -1704,9 +1814,9 @@ class CaptureLoop:
         try:
             while self.running.is_set():
                 w = windows[win_idx % len(windows)]
-                deadline = (time.time() + self.settings["dwell_s"]
-                            if len(windows) > 1 else None)
-                self.open_window(w, announce_dwell=deadline is not None)
+                dwell = w.get("dwell_s") or self.settings["dwell_s"]
+                deadline = (time.time() + dwell if len(windows) > 1 else None)
+                self.open_window(w, dwell if deadline is not None else None)
                 while self.running.is_set() and (deadline is None
                                                  or time.time() < deadline):
                     if not self.read_and_process():
@@ -1731,7 +1841,7 @@ class CaptureLoop:
         # policy re-enumerates the device instead of treating it as a normal exit.
         return 1 if stream_failed else 0
 
-    def open_window(self, w, announce_dwell):
+    def open_window(self, w, dwell_s):
         """Retune, and discard everything that belonged to the old centre.
 
         Every per-channel index is defined relative to the centre, so the grid,
@@ -1755,8 +1865,42 @@ class CaptureLoop:
         self.log.window_id = self.window_id
         print(f"\n== {center/1e6:.3f} MHz"
               + (f" ({w['label']})" if w["label"] else "")
-              + (f", {self.settings['dwell_s']:.0f} s" if announce_dwell else "")
+              + (f", {dwell_s:.0f} s" if dwell_s else "")
               + " ==")
+        self.check_linearity()
+
+    def check_linearity(self):
+        """Confirm the front end is linear on this window before surveying it.
+
+        Per window rather than per run: it depends on what is on the air in the
+        band being listened to. Measured 2026-08-26, the same radio at the same
+        gain was linear at 466 MHz and compressing at 146 MHz minutes apart, and
+        at 155 MHz a paging transmitter drove it in and out of compression
+        between captures.
+        """
+        if self.args.simulate:
+            # simradio does not model gain, so the floor does not move and the
+            # check can only ever return "inconclusive". Skipping says that
+            # plainly instead of writing a verdict that means nothing.
+            db.set_window_linearity(self.conn, self.window_id, "unchecked")
+            return
+        verdict = self.radio.linearity(self.det.grid, self.periodogram,
+                                       self.chunk, self.settings["gain"])
+        db.set_window_linearity(self.conn, self.window_id, verdict)
+        if verdict == "compressed":
+            print(f"   ** FRONT END COMPRESSED at gain "
+                  f"{self.settings['gain']:.0f} — this band is too strong for "
+                  f"the current attenuation.\n"
+                  f"      Levels logged from this window are understated and "
+                  f"clipping will NOT report it.\n"
+                  f"      Add attenuation ahead of the receiver.",
+                  file=sys.stderr)
+        elif verdict == "inconclusive":
+            print(f"   front-end linearity inconclusive — gain "
+                  f"{self.settings['gain']:.0f} may be below the point where "
+                  f"the noise floor responds at all", file=sys.stderr)
+        else:
+            print("   front end linear")
 
     def close_window(self):
         """Anything still keyed is closed rather than left in flight.
@@ -1985,7 +2129,9 @@ def run(args):
     print(f"{settings['mode']}: " + ", ".join(
         f"{w['center_hz']/1e6:.3f} MHz" + (f" ({w['label']})" if w['label'] else "")
         for w in windows)
-        + (f", {settings['dwell_s']:.0f} s each" if len(windows) > 1 else ""))
+        + ("" if len(windows) == 1 else
+           "  dwell " + ", ".join(
+               f"{(w.get('dwell_s') or settings['dwell_s']):.0f} s" for w in windows)))
     print(f"{grid_n} channels on a {CHANNEL_HZ/1000:.2f} kHz grid, "
           f"{fs/rate*1000:.1f} ms frames ({rate/fs:.0f}/sec)")
     print(f"detect on {settings['on_db']:.1f} dB / off {settings['off_db']:.1f} dB, "

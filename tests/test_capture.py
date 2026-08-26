@@ -18,6 +18,7 @@ import numpy as np
 
 from support import TempDirCase
 
+import survey_prototype as proto
 from survey_prototype import CaptureStore
 
 AUDIO_FS = 24000.0
@@ -127,3 +128,44 @@ class TestBudget(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompressionVerdict(unittest.TestCase):
+    """Front-end linearity from three noise-floor readings.
+
+    This is the one overload mode OverloadMonitor cannot see. Compression sets
+    in well before samples reach full scale, so clipping frames read zero right
+    through it, and desense watches for the floor rising together — while
+    compression makes it fail to rise. Every existing indicator stays clean
+    while the logged levels go quietly wrong.
+    """
+
+    def test_equal_steps_are_linear(self):
+        # 466 MHz on the bench, 2026-08-26: +10.0 dB per gain step throughout.
+        self.assertEqual(proto.compression_verdict([-122.0, -112.0, -102.0]),
+                         "linear")
+
+    def test_a_squashed_top_step_is_compression(self):
+        # 146 MHz on the bench: +10.2 then +6.2. The receiver is running out of
+        # headroom and nothing else in the deck notices.
+        self.assertEqual(proto.compression_verdict([-106.3, -96.1, -89.9]),
+                         "compressed")
+
+    def test_hard_compression(self):
+        self.assertEqual(proto.compression_verdict([-96.1, -89.9, -87.4]),
+                         "compressed")
+
+    def test_no_response_is_inconclusive_not_linear(self):
+        """Below the ADC knee neither step moves, so there is nothing to compare.
+
+        Calling that 'linear' would be the wrong answer in the most dangerous
+        direction: it reads as a clean bill of health for a configuration the
+        check simply cannot assess.
+        """
+        self.assertEqual(proto.compression_verdict([-129.4, -129.3, -129.4]),
+                         "inconclusive")
+
+    def test_borderline_stays_linear(self):
+        # 10.0 then 7.5 is a ratio of 0.75, above the 0.7 threshold.
+        self.assertEqual(proto.compression_verdict([-120.0, -110.0, -102.5]),
+                         "linear")
