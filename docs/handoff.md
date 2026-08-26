@@ -1,13 +1,19 @@
-# Handoff — state of the software as of 2026-08-25
+# Handoff — state of the software as of 2026-08-27
 
 Written for whoever picks this up next, agent or human. Covers what exists, why it is
 shaped this way, and what is deliberately unfinished. Read this before changing the
 schema or the enricher; several things that look arbitrary are load-bearing.
 
-Both Airspys arrived 2026-08-25 and Phase 1 is in progress; section 8 covers the fixes
-that had to land before the bench procedure could be followed at all. Everything below
-that section was built and tested against synthetic events. **Nothing here has yet seen a
-real signal.** Treat every threshold as a guess until Phase 1 through 3 say otherwise.
+Both Airspys arrived 2026-08-25 and Phase 1 is in progress. Sections 8 and 9 cover what
+plugging one in found; `docs/phase_log.md` has the measurements and section 10 has what is
+left to do.
+
+**Be precise about what has and has not met a real signal.** `--spectrum` has, extensively,
+and six faults came out of it. **The capture loop has not** — the detector, `EventTracker`,
+the two-phase write, tone and DCS decoding, the tier ladder and repeater pairing have only
+ever run against `simradio`, because `spectrum_capture` is a completely separate path that
+writes no events. Treat every threshold in this repository as a guess until Phases 2
+through 4 say otherwise.
 
 ---
 
@@ -54,7 +60,7 @@ analyser, the two-phase write and the retune logic end to end:
 ```bash
 python3 src/survey_prototype.py --simulate 14 --receiver-id uhf
 python3 src/survey_prototype.py --simulate 8 --rate 2.4e6 --receiver-id vhf \
-        --dwell-seconds 6                       # rotation across three windows
+        --dwell-seconds 6                       # rotation across both windows
 python3 src/dcs.py                              # DCS codeword table self-check
 ```
 
@@ -285,7 +291,7 @@ retune logic and the database wiring were all unverified — together, at a fest
 python3 src/survey_prototype.py --simulate 14 --receiver-id uhf \
         --db data/survey.sqlite --capture-dir data/captures
 python3 src/survey_prototype.py --simulate 8 --rate 2.4e6 --receiver-id vhf \
-        --dwell-seconds 6            # exercises rotation across three windows
+        --dwell-seconds 6            # exercises rotation across both windows
 ```
 
 It is not a channel model — no path loss, no multipath, no adjacent-channel
@@ -701,7 +707,7 @@ never have failed, because all seven channels always snapped to nominal.
 
 `tests/test_spectrum.py`, 10 tests. It carries the stub-SoapySDR harness, so
 `--spectrum` is now reachable without hardware and the next change to it is
-checked rather than inspected. The suite is 211 tests.
+checked rather than inspected. The suite was 211 tests at that point; it is 222 now.
 
 ### Documentation corrected
 
@@ -812,13 +818,113 @@ exponential. It says the arithmetic is right. It cannot say the receiver is.
 
 ---
 
-## 9. Housekeeping still outstanding
+## 9. Fifth pass: compression, and regrouping the receivers
 
-- DHCP reservation for `radio-deck` — it moved .243 to .244 mid-session once already
-- WiFi power save disabled via systemd oneshot (no NetworkManager on Ubuntu Server)
-- Map physical USB ports to buses and label the case. The two Airspys must land on
-  different 480M root hubs. Doable today with a thumb drive; retires a Phase 6 gate
-- GitHub access is a full account key on a machine going into a backpack. A repo-scoped
-  deploy key has the same convenience and a blast radius of one repo
-- The repository is public. `data/` is gitignored so the database will not leak, but
-  `docs/` will accumulate site notes and observed frequencies from real deployments
+Both changes fall out of the same measurement, and the first is a failure mode the deck
+had no way to see.
+
+**Gain compression is invisible to `OverloadMonitor`.** It watches two things: clipping,
+which is samples at full scale, and desense, which is the floor on every channel rising
+together. Compression is neither. It sets in well before samples reach full scale — so
+clipping frames read **zero** right through it — and it makes the floor fail to *rise*,
+which is the opposite of what desense looks for. Every indicator stays clean while every
+level the deck logs is understated.
+
+Measured at 146 MHz on a bare antenna, the floor rises +10.4 dB and +10.2 dB across the
+first two gain steps, then only +6.2 and +2.5. `compression_verdict()` compares two equal
+gain steps and asks whether they agree, which is self-calibrating — necessary, because the
+Airspy's "dB" of gain are index steps and three of them move the floor about ten, so any
+absolute expectation would be device lore. It returns `linear`, `compressed`, or
+`inconclusive`; the last is the honest answer below the ADC knee, where neither step moves
+and there is nothing to compare. Calling that "linear" would be wrong in the most dangerous
+direction — a clean bill of health for a configuration the check cannot assess.
+
+It runs **per window**, not per run, because the answer depends on what is on the air in
+the band being listened to: the same receiver at the same gain measured linear at 466 MHz
+and compressed at 146 MHz minutes apart. Migration 9 records the verdict on
+`coverage_windows` and `v_coverage` surfaces it, for the same reason `events.overload`
+exists — a coverage figure that does not say the band was compressed is exactly the
+clean-looking log full of junk the overload monitor was built to prevent.
+
+**The receivers are now grouped by required attenuation, not by service.** Phase 1 measured
+446 and 466 wanting 4–5 dB and 146 and 155 wanting 17–20 dB. A receiver carries one pad, so
+grouping ham with ham put a 4 dB need and a 20 dB need on the same radio, which nothing
+satisfies: too little attenuation compresses the front end silently, too much throws away
+the sensitivity the survey depends on. 446 moved to `uhf`.
+
+That made `uhf` rotate, which would have halved coverage of the band the survey exists for,
+so **dwell is per window now**, falling back to the receiver's: 466 gets 300 s and 446 gets
+60. `--dwell-seconds` still overrides everything, so `--simulate` keeps exercising rotation
+quickly.
+
+---
+
+## 10. What remains
+
+Ordered by what it needs rather than by phase number, because the blocking constraint is
+usually a part in the post rather than a gate.
+
+### The largest untested surface, and it needs nothing
+
+**The capture loop has still never seen a real signal.** Everything in sections 8 and 9
+went through `--spectrum`, which is a separate path — `spectrum_capture` does not go
+through `Radio`, does not use `Detector`, `EventTracker`, `EventLog` or `analyze_analog`,
+and writes no events. The detector, the two-phase write, tone and DCS decoding, the tier
+ladder and repeater pairing have only ever run against `simradio`.
+
+`--spectrum` was in exactly that position on the morning of 2026-08-25 and turned out to
+have six faults in it, three of which no amount of running without hardware could have
+found. The capture loop is a much larger body of code. **Phase 2 is the priority and it
+requires only the antenna and a handheld.**
+
+### Then, still with nothing new to buy
+
+- **Phase 3, tones.** CTCSS and DCS against real radios. The decoder has only met synthetic
+  tones, and section 5 records how convincingly the DCS module was wrong before one
+  off-air codeword settled it.
+- **Decide what to do about the internal spurs.** 464.000 and 470.000 MHz sit above
+  `detection.on_db` of 10.0 and will log as traffic on channels nobody keyed. They are
+  identifiable — a spur generated from the deck's own reference is coherent with it and
+  reports a zero frequency offset, where a real signal shows the receiver's clock error —
+  so masking them is tractable. Doing nothing means a festival log with invented events in it.
+- **Housekeeping**: DHCP reservation for `radio-deck`, which moved .243 → .244 mid-session
+  once already; WiFi power save off via a systemd oneshot, there being no NetworkManager on
+  Ubuntu Server; and labelling the USB ports. Radio 1 is on Bus 004 Port 1 and the second
+  must land on a different 480M root hub, which retires part of a Phase 6 gate.
+
+### Blocked on parts
+
+- **A 5 dB pad for `uhf` and a 20 dB for `vhf`**, then re-verify the delta and close Gate 1
+  steps 10, 11 and 13.
+- **Re-measure 155 MHz once it is linear.** It is uncharacterised, not fine: a paging
+  transmitter at 152.600 reading +55.4 dB drives the front end in and out of compression
+  between captures, and no antenna-versus-dummy figure taken in that state means anything.
+- **A second FM notch and a second antenna.** One Flamingo cannot serve two receivers, and
+  broadcast rejection matters *more* on the VHF radio — 146 MHz is 38 MHz from the top of
+  the broadcast band and that receiver is already the one compressing.
+- **Phase 6**, second radio: serial, ppm, gain and its own linearity check, both radios on
+  different 480M root hubs under load.
+
+### Before it is deployable
+
+- **Phase 4** — 24 h on one radio, which is also the first honest look at whether
+  `detection.on_db` and `off_db` are right. Every threshold in this repository is still a
+  guess made against synthetic signals.
+- **Phase 7**, repeater matching, against real traffic. The first survey already caught
+  5 MHz splits at 461.2/466.2, so the material exists.
+- **Phase 8**, 24 h with everything running.
+- **Disk budget.** Captures run ~16 kB/s of audio and ~190 kB/s of IQ *of traffic*, and a
+  festival is measured in days. `--capture-mb` caps it, but the cap wants choosing against
+  a real event rather than a guess.
+- **Power.** Not addressed anywhere in this repository, and a Pi 5 with two SDRs in a
+  backpack for a weekend is a real problem. Worth solving before the site, not at it.
+
+### Deliberately not scheduled
+
+- **`content` is still never determined.** Section 5 explains why, and that reasoning
+  stands. What has changed is that `--capture-dir` now exists, so a real deployment finally
+  produces recorded audio to revisit it against rather than more synthetic signals.
+- **GitHub access is a full account key** on a machine going into a backpack. A repo-scoped
+  deploy key has the same convenience and a blast radius of one repository.
+- **The repository is public.** `data/` is gitignored so the database will not leak, but
+  `docs/` will accumulate site notes and observed frequencies from real deployments.

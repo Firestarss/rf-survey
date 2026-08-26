@@ -128,14 +128,14 @@ One process per receiver, sharing one database. Not one process handling both.
         │                                              │
   USB   │  rfsurvey@uhf.service                        │
  bus002 ├─►  Airspy #1 → detect → analyse → ──┐        │
-        │    parked 466.0 MHz                 │        │
+        │    rotating 466.0 / 446.0           │        │
         │                                     ▼        │
         │                            /var/lib/rfsurvey │
         │                              survey.sqlite   │
         │                                (WAL mode)    │
   USB   │                                     ▲        │
  bus004 ├─►  Airspy #2 → detect → analyse → ──┘        │
-        │    rotating 446.0 / 146.0 / 153.2            │
+        │    rotating 146.0 / 154.95                   │
         │  rfsurvey@vhf.service                        │
         └──────────────────────────────────────────────┘
 ```
@@ -226,25 +226,30 @@ description: FRS, GMRS, Part 90 business, plus 2m and 70cm ham
 
 receivers:
   uhf:
-    serial: "0x1234ABCD"        # never address by index
-    mode: parked
-    center_hz: 466_000_000
+    serial: "637862dc2e4c6dd7"  # never address by index. Lowercase, no 0x —
+                                # that is how SoapySDR spells it, though matching
+                                # is case-insensitive and tolerates the prefix.
+    mode: rotating
+    dwell_seconds: 60           # fallback; windows below set their own
     sample_rate: 10_000_000
-    gain: 12
-    ppm: 0.0
-    attenuator_db: 20           # what's physically fitted, for the record
+    gain: 12                    # provisional and known low — see phase_log Phase 1
+    ppm: 0.64                   # positive means signals read LOW by this much
+    attenuator_db: 20           # fitted; measured target is 5 dB
     antenna: "465 MHz half-wave"
+    windows:
+      - {center_hz: 466_000_000, label: "FRS/GMRS/UHF business", dwell_seconds: 300}
+      - {center_hz: 446_000_000, label: "70cm ham", dwell_seconds: 60}
 
   vhf:
-    serial: "0x5678EF01"
+    serial: null                # TODO Phase 6
     mode: rotating
     dwell_seconds: 180
     sample_rate: 10_000_000
     gain: 12
+    attenuator_db: 20           # measured target, and correct for these bands
     windows:
-      - {center_hz: 446_000_000, label: "70cm ham"}
       - {center_hz: 146_000_000, label: "2m ham"}
-      - {center_hz: 153_200_000, label: "MURS + VHF business"}
+      - {center_hz: 154_950_000, label: "MURS + VHF business"}
 
 detection:
   on_db: 10.0

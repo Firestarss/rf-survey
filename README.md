@@ -10,8 +10,13 @@ to program a radio and join the conversation.
 
 | Receiver | Role | Coverage |
 |---|---|---|
-| `uhf` | parked at 466.0 MHz | FRS, GMRS, Part 90 — both repeater halves |
-| `vhf` | rotating | 446.0 MHz (70 cm), 146.0 MHz (2 m), 153.2 MHz (MURS + VHF business) |
+| `uhf` | rotating, 300 s / 60 s | 466.0 MHz (FRS, GMRS, Part 90 — both repeater halves), 446.0 MHz (70 cm ham) |
+| `vhf` | rotating, 180 s each | 146.0 MHz (2 m ham), 154.95 MHz (MURS + VHF business) |
+
+The receivers are grouped by **how much attenuation each band needs**, not by service.
+Phase 1 measured 446 and 466 wanting 4–5 dB and 146 and 155 wanting 17–20 dB; one radio
+carries one pad, so a receiver spanning both would be wrong for at least one of its
+windows. See `docs/phase_log.md`, Phase 1.
 
 ---
 
@@ -30,9 +35,15 @@ data/        gitignored, disposable
 ## Running
 
 ```bash
-python3 src/survey_prototype.py --selftest     # sizing and speed, no hardware
-python3 src/survey_prototype.py --spectrum     # headless PNG + text peak list
-tools/deck-check.sh                            # soak and diagnostics
+python3 src/survey_prototype.py --selftest              # sizing and speed, no hardware
+bash tools/run-tests.sh                                # correctness: 222 tests
+bash tools/deck-check.sh diag                          # diagnostics
+
+# Look at a band without a monitor. Needs a radio; writes a PNG and prints the
+# strongest channels, each with a measured frequency and the receiver's clock
+# error against it.
+python3 src/survey_prototype.py --spectrum band.png \
+        --serial <SERIAL> --freq 466.0e6 --gain 42 --ppm 0.64
 ```
 
 The capture loop runs without a radio too, against a synthetic one
@@ -42,7 +53,7 @@ retune logic end to end:
 ```bash
 python3 src/survey_prototype.py --simulate 14 --receiver-id uhf
 python3 src/survey_prototype.py --simulate 8 --rate 2.4e6 --receiver-id vhf \
-        --dwell-seconds 6              # rotation across three windows
+        --dwell-seconds 6              # rotation across both windows
 ```
 
 ## Tests

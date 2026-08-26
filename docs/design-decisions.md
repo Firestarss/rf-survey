@@ -60,9 +60,26 @@ crash, it just quietly reports fiction.
 | 10 dB | 55 dB | clips — **broken** |
 | **20 dB** | **45 dB — plenty** | **survives** |
 
-**So: a permanent 20 dB attenuator on every receiver.** This is also the answer to
+**So: a permanent attenuator on every receiver.** This is also the answer to
 "I can't survey the site in advance" — you don't tune for a site, you build so the
 site doesn't matter.
+
+**Corrected 2026-08-26: the value is per band, and 20 dB is right for only one of them.**
+The table above reasons from a strong nearby transmitter, which is the overload case, and
+that reasoning holds. It ignores the opposite failure: attenuation also discards the
+*ambient noise* the receiver needs to hear over its own. Measured on hardware, 20 dB left
+the UHF receiver's antenna-versus-dummy delta at 0.7 dB where 8–10 dB is wanted — the
+receiver's own noise dominating everything it heard.
+
+| Band | measured need |
+|---|---|
+| 446, 466 MHz | **4–5 dB** |
+| 146 MHz | **17–19 dB** |
+| 155 MHz | ≥20 dB, and not yet measurable — see `phase_log.md` |
+
+Man-made noise falls with frequency, which is why VHF needs roughly four times the
+attenuation of UHF. The design philosophy survives intact; the single number does not.
+Method and figures in `docs/phase1-detail.md` step 11.
 
 ---
 
@@ -107,8 +124,17 @@ just needs two bulkhead connectors.
 
 | Receiver | Tuned to | Duty | What's in it |
 |---|---|---|---|
-| 1 | **466.0 MHz** | parked | Every FRS and GMRS channel, the frequencies GMRS repeaters listen on, and Part 90 business — both halves of all of it |
-| 2 | **446.0 / 146.0 / 153.2** | 33% each | 70 cm ham; 2 m ham; MURS and low VHF business |
+| `uhf` | **466.0 / 446.0** | 300 s / 60 s | Every FRS and GMRS channel, the frequencies GMRS repeaters listen on, and Part 90 business — both halves of all of it; plus 70 cm ham |
+| `vhf` | **146.0 / 154.95** | 180 s each | 2 m ham; MURS and low VHF business |
+
+**Revised 2026-08-26.** 446 was originally grouped with the other two ham/VHF windows on
+receiver 2. Phase 1 measured what attenuation each band actually needs — 446 and 466 want
+4–5 dB, 146 and 155 want 17–20 dB — and a receiver carries one pad. Grouping by service put
+a 4 dB need and a 20 dB need on the same radio, which no single pad satisfies: too little
+attenuation compresses the front end **silently**, and too much throws away sensitivity.
+Grouping by required attenuation instead gives each radio one correct pad. Dwell is lopsided
+on `uhf` because 466 is the band the survey exists for and 446 is worth sampling rather than
+watching.
 
 **Why 466.0 specifically.** Usable span works out to about 461.5–470.5 MHz, which
 puts every frequency that matters comfortably inside:
@@ -206,7 +232,7 @@ evidence about whether the third radio is needed.
 Official 27 W USB-C supply during bring-up. Battery, solar and conversion are
 deferred until Phase 8 produces real consumption numbers.
 
-## D9 — Front end: **20 dB pad + FM notch per chain, both swappable**
+## D9 — Front end: **a measured pad + FM notch per chain, both swappable**
 
 Order doesn't matter electrically — both are passive and neither can be overloaded.
 

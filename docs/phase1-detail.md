@@ -133,7 +133,14 @@ which comes up again in step 11.
 Full chain, once you have the parts:
 
 ```
-antenna → FM notch → 20 dB pad → Airspy
+antenna → FM notch → pad → Airspy
+```
+
+The pad value is **measured, not assumed** — step 11 solves for it. It came out 5 dB for
+this receiver and 17-19 dB at 146 MHz, so do not fit 20 dB and consider it settled.
+Any value will do for steps 5-8, which only need the front end protected.
+
+```
 ```
 
 Both are passive, so the order of notch and pad doesn't matter electrically. Put them in
@@ -263,7 +270,7 @@ the hard way when a broadcast tower quietly ruins a run. If it costs you more th
 
 Same reference-then-insert method as step 9. Five minutes.
 
-**Measure both 20 dB pads separately, and label them.** Masking tape, "A" and "B". This matters
+**Measure every pad separately, and label them.** Masking tape, "A" and "B". This matters
 more than it looks — see below.
 
 For each pad, insert it into the reference path and sweep. Record attenuation at 150 MHz and at
@@ -381,7 +388,8 @@ Check `airspy-probe.txt` from step 4 for what your driver exposes.
 
 ## Step 12 — measure the frequency error
 
-MiniSA generator at exactly 466.000000 MHz, **through the 20 dB pad**, direct into the Airspy.
+MiniSA generator at exactly 466.000000 MHz, **through a pad**, direct into the Airspy. Any
+value that protects the front end will do; this step measures frequency, not level.
 Capture, and read the `measured` and `ppm` columns of the peak list directly — the deck does
 the arithmetic:
 
@@ -484,7 +492,7 @@ definition.
 | All 7 channels land correctly, evenly spaced | yes | |
 | Notch measured: ≥30 dB at 88–108 | yes | |
 | Notch measured: ≤1.5 dB at 466 | yes | |
-| Both 20 dB pads measured and labelled A/B | yes | |
+| Both pads measured and labelled A/B | yes | |
 | Pads flat across VHF/UHF | yes | |
 | Pad A vs pad B difference recorded | yes | |
 | Antenna-vs-dummy delta 8–10 dB | yes | |
@@ -510,13 +518,14 @@ PAD_B  = ....  dB at 466 MHz     # measured now, used from Phase 6
 
 ```
 PHASE 1  2026-__-__  PASS / FAIL
-  serial: 0x................   usb: bus _ port _
-  gain: __ (linearity)   antenna-vs-dummy delta: __ dB
-  ppm: ____
-  notch: __ dB at 98 MHz, __ dB at 466 MHz
+  serial: ................   usb: bus _ port _   firmware: ..............
+  gain: __ of 45 (LNA->MIX->VGA)   linear to gain __ (compression sweep)
+  pad: __ dB     antenna-vs-dummy delta: __ dB    antenna: ..............
+  ppm: ____  (positive = signals read low; this value corrects them)
+  notch: __ dB at 88, __ at 98, __ at 108 MHz;  __ dB loss at 466 MHz
   pad A: __ dB at 150, __ dB at 470
   pad B: __ dB at 150, __ dB at 470   (A-B delta: __ dB)
-  channels 1-7: all correct / notes
+  channels 1-7: all correct / notes    worst spacing error: ___ Hz
   unexplained: none / list
 ```
 

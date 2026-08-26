@@ -1,19 +1,22 @@
 # Phase log
 
 Running record of gate results. One entry per phase, appended as it closes.
-Full procedures live in `docs/bench-bringup.md`.
+Full procedures live in `docs/bench-bringup.md`, which defines what the phases are;
+this file is the only place their status is tracked. The names below are copied from
+that document's section headings and must stay identical to them — on 2026-08-27 the
+two had drifted into describing different plans.
 
 | Phase | Status | Date | Headline |
 |---|---|---|---|
 | **0** — Pi alone, no radio | **PASS** | 2026-08-18 | 28.8% of one core, 27 concurrent, peak 71.6 °C, zero throttling, fan confirmed |
 | **1** — first radio, first signal | in progress | 2026-08-26 | radio 1 up; 7/7 FRS channels; ppm closed at −0.64 on three references; antenna steps outstanding |
-| **2** — RF front end | — | — | |
-| **3** — tones and classification | — | — | |
-| **4** — logging and database | — | — | |
-| **5** — second receiver | — | — | |
-| **6** — dual-bus USB load | — | — | |
-| **7** — repeater pairing | — | — | |
-| **8** — 24 h unattended soak | — | — | |
+| **2** — detection and logging | — | — | the capture loop has still never seen a real signal |
+| **3** — tones | — | — | |
+| **4** — leave it running | — | — | 24 h, one radio; where detection thresholds get tuned |
+| **5** — digital | — | — | DMR must not be mistaken for analog |
+| **6** — second radio | — | — | dual-bus USB; needs a 2nd notch and antenna |
+| **7** — repeater matching | — | — | |
+| **8** — 24 hours, everything | — | — | |
 
 ---
 
@@ -252,13 +255,25 @@ field, and PCs are noisy at VHF. Some of that 467x may be the desktop rather tha
 Worth one check with the antenna elsewhere before buying on it — though the deployed deck
 also sits beside a computer, so it is not unrepresentative.
 
+**What Phase 1 changed in the software.** The measurements drove six code changes and
+three corrections to these procedures; `docs/handoff.md` sections 8 and 9 carry the
+detail. The two with consequences beyond Phase 1:
+
+- a **front-end linearity check on every window**, because compression is invisible to the
+  existing overload detection — clipping frames read zero right through it — and migration
+  9 records the verdict per window so a compressed band cannot be mistaken for a quiet one
+- the **receivers regrouped by required attenuation** rather than by service, 446 moving
+  from `vhf` to `uhf`, because no single pad serves a receiver spanning a 4 dB need and a
+  20 dB one
+
 **Outstanding for Gate 1**
 
 - [x] Notch filter measured (step 9) — done 2026-08-26, PASS
-- [ ] Both 20 dB pads measured and labelled A/B, difference recorded (MiniSA, step 10)
+- [ ] Both pads measured and labelled A/B, difference recorded (MiniSA, step 10)
 - [~] Antenna-versus-dummy measured (step 11) — 2026-08-26. Needs a 5 dB pad, on order
 - [x] ppm confirmed against the MiniSA generator (step 12) — done 2026-08-26
-- [ ] Everything in the spectrum accounted for (step 13)
+- [ ] Everything in the spectrum accounted for (step 13) — provisional survey done
+      2026-08-26 and no intermodulation found, but the gate wants the final pad fitted
 
 **Open question carried into the gate.** Three signals sit above `detection.on_db`
 of 10.0 dB with a dummy load fitted. 470.000000 MHz reports exactly 0 Hz offset and is

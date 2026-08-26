@@ -15,17 +15,28 @@ radio concepts. `pi-architecture.md` for where things live on the Pi.
 
 ## Status
 
-| Phase | State | Date | Result |
-|---|---|---|---|
-| **0** — Pi alone, no radio | **PASS** | 2026-08-18 | 28.8% of one core, 27 concurrent, peak 71.6 °C, zero throttling, fan confirmed |
-| **1** — first radio | not started | | awaiting Airspy R2 |
-| **2** — detection and logging | not started | | |
-| **3** — tones | not started | | |
-| **4** — 24 h single radio | not started | | |
-| **5** — digital | not started | | |
-| **6** — second radio | not started | | |
-| **7** — repeater matching | not started | | |
-| **8** — 24 h everything | not started | | |
+**Live gate status lives in `docs/phase_log.md`, not here.** This file carries the
+procedures; that one carries what has actually happened. There used to be a copy of the
+status table in both, and on 2026-08-27 they had drifted into disagreeing about what the
+phases *were* — this document's headings said Phase 5 was digital modes, its own status
+table said Phase 4 was "24 h single radio" where the heading said "leave it running", and
+`phase_log.md` had dropped digital entirely and split the second radio across Phases 5
+and 6. For a gated procedure where you write down "Gate 5 PASS", that ambiguity is
+corrosive. One table, in the tracker.
+
+**The phases, as this document defines them:**
+
+| Phase | What it proves |
+|---|---|
+| 0 | the Pi alone, no radio |
+| 1 | first radio, first signal |
+| 2 | detection and logging — the capture loop, not `--spectrum` |
+| 3 | tones — CTCSS and DCS |
+| 4 | leave it running — 24 h, one radio, threshold tuning |
+| 5 | digital — DMR must not be mistaken for analog |
+| 6 | second radio — dual-bus USB |
+| 7 | repeater matching |
+| 8 | 24 hours, everything |
 
 ### As-built, confirmed on hardware
 
@@ -328,7 +339,11 @@ and whether the algorithms pass on your build, before hardware variables enter.
 
 ## Phase 1 — first radio, first signal
 
-**Chain:** antenna → FM notch → 20 dB pad → Airspy → USB → Pi
+**Chain:** antenna → FM notch → pad → Airspy → USB → Pi
+
+The pad is **5 dB on the UHF receiver and 20 dB on VHF**, measured in Phase 1 — not one
+value for both. Use 20 dB while measuring if that is what you have; the step 11 procedure
+below solves for the right value rather than assuming it.
 
 Order of notch and pad doesn't matter electrically; both are passive.
 
@@ -553,7 +568,8 @@ through a real signal path.
 
 ## Phase 4 — leave it running
 
-Antenna somewhere with a view, parked on 466.0, 24 hours under tmux. You'll pick up real
+Antenna somewhere with a view, parked on 466.0 with `--freq 466.0e6` (which overrides the
+profile's rotation), 24 hours under tmux. You'll pick up real
 traffic — neighbours, retail staff, construction crews, school buses.
 
 Watch for memory flat over 24 hours, overflow count still zero, disk growth matching
@@ -612,7 +628,8 @@ cat /sys/devices/platform/soc/soc:firmware/get_throttled
 If undervoltage appears, add `usb_max_current_enable=1` to `/boot/firmware/config.txt`, or
 fall back to a powered hub. Direct should work at two.
 
-Radio 1 parked on 466.0, radio 2 rotating 446.0 / 146.0 / 153.2.
+`uhf` rotating 466.0 / 446.0, `vhf` rotating 146.0 / 154.95. Grouped by the attenuation
+each band needs rather than by service — see `docs/design-decisions.md` D9.
 
 ### The band-switching trap
 
@@ -642,8 +659,13 @@ is why it's worth testing where you control everything.
 | Someone talking to a repeater | GMRS | 467.700 | 141.3 Hz | key 3 s |
 | The repeater answering | Ham HT | 462.700 | *different* tone, or none | start ~50 ms later, run ~1 s longer |
 
-Both sit inside the parked 466.0 window, so one radio hears both halves. That's the whole
+Both sit inside the 466.0 window, so one radio hears both halves. That's the whole
 reason for that window.
+
+**Since 2026-08-26 that window is no longer parked** — `uhf` rotates 466.0 for 300 s then
+446.0 for 60 s. Both halves are still heard by the same radio, but only during the 466
+dwell, so run this test inside one. `--freq 466.0e6` parks it for the duration if you would
+rather not think about the timing, and for a bench test that is the better choice.
 
 The software should work out these are two events, 5 MHz apart, that 467.700 is the input
 because it always starts first, that **141.3 came from the input side** and is the tone you'd
@@ -780,13 +802,15 @@ PHASE 0  2026-08-20  PASS
   ssh + serial console both working
   temp under load: 62C   get_throttled: 0x0
   selftest: steady load 38% of one core, ~14 concurrent
-  test suite: 201 passed
+  test suite: 222 passed
   note: dropped pciex1_gen=3, gen2 works fine
 
 PHASE 1  2026-08-24  PASS with question
-  serial 0x1234ABCD   gain: linearity 10   ppm +0.6
+  serial 637862dc2e4c6dd7   gain 42 of 45, linear to 39   pad 5 dB   ppm +0.64
   notch: 34 dB at 98 MHz, 0.9 dB at 466
   QUESTION: strong carrier at 464.550 that never stops. Real? band.png attached.
+           (test: a spur made from our own reference reads 0 Hz offset; a real
+            transmitter reads the receiver's clock error)
 
 PHASE 2  2026-08-25  FAIL
   CPU 78% one radio, expected under 40%

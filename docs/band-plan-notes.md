@@ -70,10 +70,13 @@ Seeded channels against the profile's windows at 10 MSPS:
 
 | Window | Centre | Nominal span | Channels |
 |---|---|---|---|
-| `uhf` parked | 466.000 | 461.000–471.000 | 40 |
-| `vhf` rotating | 446.000 | 441.000–451.000 | 1 |
+| `uhf` rotating | 466.000 | 461.000–471.000 | 40 |
+| `uhf` rotating | 446.000 | 441.000–451.000 | 1 |
 | `vhf` rotating | 146.000 | 141.000–151.000 | 3 |
 | `vhf` rotating | 154.950 | 149.950–159.950 | 14 |
+
+446 moved from the `vhf` receiver to `uhf` on 2026-08-26. The windows are grouped by the
+attenuation each band needs rather than by service — see `docs/design-decisions.md` D9.
 
 The ham windows show low channel counts because ham allocations are mostly segments,
 which this count excludes; both windows fully contain their bands.
@@ -119,8 +122,9 @@ differ by 4 dB, which is noise.
 **Received power is not usable, on any channel.** It is transmit power minus path loss,
 and path loss swings tens of dB across a site. At a festival the correlation likely
 inverts: FRS handhelds are dense and close, GMRS repeaters are on distant towers. The
-deck also has a 20 dB attenuator fitted and an unrecorded antenna, so absolute power is
-not calibrated to begin with.
+deck also has an attenuator fitted — a different value per receiver, 5 dB on UHF and 20 dB
+on VHF — and an unrecorded antenna, so absolute power is not calibrated to begin with, and
+is not even comparable between the two radios.
 
 **Bandwidth and deviation are usable**, because both are properties of the transmission
 rather than the path. Anything measurably wider than 12.5 kHz on channels 15–22 cannot
