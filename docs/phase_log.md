@@ -12,7 +12,7 @@ two had drifted into describing different plans.
 | **1** — first radio, first signal | in progress | 2026-08-26 | radio 1 up; 7/7 FRS channels; ppm closed at −0.64 on three references; antenna steps outstanding |
 | **2** — detection and logging | in progress | 2026-08-27 | detection and logging work; blocked on single-core saturation at 10 MSPS and phantom harmonics |
 | **3** — tones | — | — | |
-| **4** — leave it running | — | — | 24 h, one radio; where detection thresholds get tuned |
+| **4** — leave it running | **running** | 2026-08-27 | started 21:24 UTC under systemd, unattended, parked on 466 |
 | **5** — digital | — | — | DMR must not be mistaken for analog |
 | **6** — second radio | — | — | dual-bus USB; needs a 2nd notch and antenna |
 | **7** — repeater matching | — | — | |
@@ -781,3 +781,56 @@ the wrong one. The confirmed table is in `docs/tools.md`.
 - [ ] Zero overflows for an hour at 10 MSPS — needs the threading or optimisation work
 - [ ] Phantom harmonics distinguished from real events
 - [ ] An hour-long clean run, which neither of the above allows yet
+
+---
+
+## Phase 4 — running, opened 2026-08-27 21:24 UTC
+
+**The first genuinely unattended run.** Started under systemd with the operator
+leaving for several days, which is the condition Phase 4 has been waiting for —
+the gate asks for 24 hours of nobody touching it.
+
+```
+unit      rfsurvey@uhf, enabled, Restart=on-failure, StartLimitBurst 30/30min
+chain     antenna -> adaptor -> Flamingo -> 2 dB -> 3 dB -> cable -> Airspy
+radio     637862dc2e4c6dd7, USB bus 4
+tuning    466.0 MHz parked, 10 MSPS, gain 39, ppm 0.64
+detect    on 10.0 / off 6.0 dB, min 0.12 s, hang 0.30 s  (correct for the
+          first time on a 10 MSPS run — see the frame/MTU fix above)
+database  data/phase4.sqlite, run 2
+audio     data/captures/run2, 40 GB budget
+opening   front end linear, overflow 0, clip 0, desense 0
+```
+
+**Parked rather than rotating.** The band-switching trap in `bench-bringup.md` is
+documented and unverified: a retune that carries noise-floor state across bands
+produces a burst of false detections after every switch. That is a variable to
+add while somebody is watching, not to a run nobody is. 466 is also the band the
+survey exists for.
+
+**10 MSPS deliberately, with Gate 2 unpassed at that rate.** No bench measurement
+can say what the overflow rate is under real diurnal load over days, and that is
+the number the deployment decision needs.
+
+### What this run is expected to answer
+
+- overflow rate at 10 MSPS across a full daily traffic cycle, not a 90 s bench window
+- memory flat over days, or not
+- disk growth against the projection of ~206 bytes/event and ~59 MB/day
+- **what the periodic emitters on 461-470 actually are** — the ~62 s / 4 s family
+  and the 9.53 s / 0.17 s family. Audio capture is on specifically so these can be
+  identified offline rather than guessed at
+- whether `on_db = 10.0` is right against real traffic, which is the gate's own
+  question and has never been answered against anything but synthetic signals
+
+### Known limitations of this run, recorded before it produces anything
+
+- **One radio.** Phase 6 needs a second notch filter and a second antenna,
+  neither of which exist. Radio 2 is attached, enumerated and idle on bus 2.
+- **Antenna is indoors**, as it was for both propagation walks. Every level here
+  is a lower bound on what the hardware can do outdoors.
+- **Adjacent-channel splatter is unhandled.** Anything keying within a few metres
+  and clearing ~62 dB SNR will put DCS-carrying skirts +/-25 kHz out, at any gain.
+- **Step 10 of Gate 1 was skipped** — pads A/B on the MiniSA. Deliberate: padcal
+  cross-checked the fitted 5 dB against Phase 1's independent 17.3x fit, and the
+  hour was better spent elsewhere.
