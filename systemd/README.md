@@ -22,6 +22,29 @@ automatically from power-on, `sudo systemctl enable rfsurvey.target` is the swit
 — but then it is running every time the Pi boots, whatever else you had planned
 for it.
 
+**Enable it for a genuinely unattended run, and only then.** For a deployment
+where nobody can log in for days — a festival, or a bench run left going over a
+holiday — boot persistence stops being a nuisance and becomes the point: a Pi
+that reboots at 3 a.m. and comes back without the survey has quietly ended the
+deployment, and you find out when you get home. On 2026-08-27 this machine
+dropped its SSH session and needed a reboot to get back in, so it is not
+hypothetical.
+
+## Per-instance arguments
+
+The unit reads an optional `systemd/rfsurvey-<instance>.env`, copied nowhere —
+it is read from the repository, and the leading `-` on `EnvironmentFile=` means
+a missing one is not an error. Two variables:
+
+| variable | what it does |
+|---|---|
+| `RFSURVEY_DB` | database path. Defaults to `data/survey.sqlite`, which holds the synthetic fixture scenario the test suite depends on — override it for any real run |
+| `RFSURVEY_ARGS` | appended to the command line, word-split. `--freq`, `--rate`, `--capture-dir`, `--capture-mb` |
+
+This is what lets one unit serve a two-minute bench check and a month-long
+deployment without editing the unit. `systemd/rfsurvey-uhf.env` is the Phase 4
+configuration and is commented with why each value is what it is.
+
 ## Start and stop
 
 Both receivers together:

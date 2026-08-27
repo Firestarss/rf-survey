@@ -16,23 +16,40 @@ After=local-fs.target
 # rfsurvey.target` propagate down to the instances.
 PartOf=rfsurvey.target
 
-# If it fails ten times in five minutes it is not going to fix itself: the radio
-# is unplugged, the profile is wrong, or the database is unwritable. Stop and
-# leave it stopped rather than churning.
-StartLimitIntervalSec=300
-StartLimitBurst=10
+# If it fails thirty times in half an hour it is not going to fix itself: the
+# radio is unplugged, the profile is wrong, or the database is unwritable. Stop
+# and leave it stopped rather than churning.
+#
+# Widened from 10-in-5-minutes on 2026-08-27, before the first genuinely
+# unattended run. The old limit is right for a bench session where somebody is
+# watching; over a multi-week deployment it is a trap, because one transient
+# burst of USB re-enumeration on day two stops the survey permanently and the
+# remaining weeks are lost. Thirty failures at RestartSec=10 is still five
+# minutes of solid crash-looping before it gives up, which no transient does.
+StartLimitIntervalSec=1800
+StartLimitBurst=30
 
 [Service]
 Type=simple
 User=firestarss
 WorkingDirectory=/home/firestarss/rfsurvey
 
+# Per-instance overrides, optional — the leading `-` means a missing file is
+# not an error, so an uninstalled instance still starts on the defaults. This is
+# what lets one unit serve both a bench run and a month-long deployment without
+# editing the unit: put --freq, a different --db, or a capture budget in
+# systemd/rfsurvey-<instance>.env and reinstall.
+#
+# RFSURVEY_ARGS is deliberately unquoted below so systemd word-splits it.
+# RFSURVEY_DB is braced because a path must not be split.
+Environment=RFSURVEY_DB=data/survey.sqlite
+EnvironmentFile=-/home/firestarss/rfsurvey/systemd/rfsurvey-%i.env
+
 ExecStart=/usr/bin/python3 src/survey_prototype.py \
     --receiver-id %i \
     --profile profiles/festival.yaml \
-    --db data/survey.sqlite \
-    --capture-dir data/captures \
-    --stats
+    --db ${RFSURVEY_DB} \
+    --stats $RFSURVEY_ARGS
 
 # on-failure, deliberately, not always.
 #

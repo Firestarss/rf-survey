@@ -108,6 +108,12 @@ COMPRESSION_GAIN_STEP = 3.0
 COMPRESSION_MIN_RISE_DB = 2.0   # below this the lower pair says nothing usable
 COMPRESSION_RATIO = 0.7         # top step this far under the lower one = squashed
 COMPRESSION_SECONDS = 0.5       # per gain point
+# Ceiling for the upward probe. The SoapyAirspy overall gain is an 0-45 control
+# filling LNA, then MIX, then VGA — confirmed against the hardware on
+# 2026-08-26, and not the 0-21 "linearity" control the Airspy documentation
+# describes. Asking for more than the device has would either clamp silently and
+# make two probe points identical, or throw.
+MAX_GAIN_DB = 45.0
 # Analysis has three different dwell requirements, not one, so it has three
 # constants. Measured against synthetic signals by sweeping dwell (see
 # docs/handoff.md); every number below is the knee of a measured curve.
@@ -1712,23 +1718,51 @@ class Radio:
         self.dev.setGain(self.RX, 0, float(gain))
 
     def linearity(self, grid, periodogram, frame, gain,
-                  step=COMPRESSION_GAIN_STEP, seconds=COMPRESSION_SECONDS):
+                  step=COMPRESSION_GAIN_STEP, seconds=COMPRESSION_SECONDS,
+                  max_gain=MAX_GAIN_DB):
         """Check the front end is still linear at `gain`, and restore it.
 
-        Steps the gain down twice and watches whether the noise floor falls by
-        the same amount each time. Runs on the open stream, so it costs about
-        `3 * seconds` and no retune. Called once per window because the answer
-        depends on what is on the air in the band being listened to — the same
-        receiver at the same gain measured linear at 466 MHz and compressed at
-        146 MHz minutes apart.
+        Steps the gain and watches whether the noise floor moves by the same
+        amount each time. Runs on the open stream, so it costs about
+        `3 * seconds` per probe and no retune. Called once per window because
+        the answer depends on what is on the air in the band being listened to —
+        the same receiver at the same gain measured linear at 466 MHz and
+        compressed at 146 MHz minutes apart.
+
+        Probes DOWNWARD first, which is the safe direction: it can only reduce
+        what reaches the converter. If that comes back `inconclusive` it tries
+        UPWARD, because inconclusive downward has a specific meaning — the two
+        reference points were below the ADC knee, where nothing moves the floor
+        and there is nothing to compare.
+
+        That case stopped being hypothetical on 2026-08-27. Fitting the measured
+        5 dB pad in place of 20 dB moved the working gain to 39, the lowest
+        setting still linear, so the downward probe lands on 36 and 33 and both
+        are under the knee. Every window would have reported `inconclusive` for
+        the whole of an unattended run, which is precisely the reading migration
+        9 exists to distinguish from a quiet band.
+
+        Upward is the more direct test for compression anyway — it asks whether
+        more gain still buys proportionally more floor — but it is second
+        because it briefly raises what the front end sees, and only worth doing
+        when the safe probe has already declined to answer.
 
         Restores the configured gain in a finally, because leaving a survey
         running at two thirds of its intended gain would be a far worse bug than
         the one this exists to catch.
         """
-        gains = [gain - 2 * step, gain - step, gain]
-        if min(gains) < 0:
-            return "inconclusive"
+        for gains in ([gain - 2 * step, gain - step, gain],
+                      [gain, gain + step, gain + 2 * step]):
+            if min(gains) < 0 or max(gains) > max_gain:
+                continue
+            verdict = self._linearity_probe(grid, periodogram, frame, gain,
+                                            gains, seconds)
+            if verdict != "inconclusive":
+                return verdict
+        return "inconclusive"
+
+    def _linearity_probe(self, grid, periodogram, frame, gain, gains, seconds):
+        """One three-point sweep, restoring `gain` however it ends."""
         levels = []
         try:
             for g in gains:
@@ -2380,8 +2414,6 @@ def run(args):
         + ("" if len(windows) == 1 else
            "  dwell " + ", ".join(
                f"{(w.get('dwell_s') or settings['dwell_s']):.0f} s" for w in windows)))
-    print(f"{grid_n} channels on a {CHANNEL_HZ/1000:.2f} kHz grid, "
-          f"{fs/rate*1000:.1f} ms frames ({rate/fs:.0f}/sec)")
     print(f"detect on {settings['on_db']:.1f} dB / off {settings['off_db']:.1f} dB, "
           f"min {settings['min_duration_s']:.2f} s, "
           f"hang {settings['hang_s']:.2f} s")
@@ -2408,6 +2440,12 @@ def run(args):
     radio.start()
 
     loop = CaptureLoop(radio, settings, args, conn, run_id, rate, center)
+    # After the loop, not before: frame_size() is what the analysis asks for and
+    # loop.fs is what the driver will actually deliver. Printing the request
+    # rather than the reality said "13.1 ms frames (76/sec)" on a 10 MSPS run
+    # delivering 6.6 ms frames at 152/sec.
+    print(f"{grid_n} channels on a {CHANNEL_HZ/1000:.2f} kHz grid, "
+          f"{loop.frame_seconds*1000:.1f} ms frames ({rate/loop.fs:.0f}/sec)")
     print(f"ring buffer {loop.ring_seconds*rate*8/1e6:.0f} MB\n")
     if loop.store is not None:
         print(f"retaining {'audio + channel IQ' if args.capture_iq else 'audio'} "
