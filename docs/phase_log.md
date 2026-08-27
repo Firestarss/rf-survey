@@ -570,6 +570,68 @@ rule would discard real traffic. These land four and five channels out, well
 beyond it. Unsolved, and it only appears at SNRs above about 60 dB, which at a
 festival means anyone keying within a few tens of metres of the deck.
 
+### 2026-08-27, night: the attenuation trade, measured at both ends
+
+A second walk, 18 points, **both 10 dB pads removed** so the only change from the
+earlier walk was the attenuation. Path loss reproduced independently:
+**30.5 dB per decade against 30.4** from the first walk.
+
+**Removing 20 dB of pad bought 7.3 dB, not 20.** At the same spot, 412 m on
+bearing 99: 21.2 dB with the pads, 28.5 dB without. The prediction offered
+beforehand was 20 dB and it was wrong, because a pad does not add its face value
+to the noise figure when external noise is already present. Referred to the
+antenna, with external noise measured at 14.8x the receiver's own:
+
+```
+    pad 20 dB -> total noise = 114.8 x receiver noise
+    pad  0 dB ->               15.8 x
+    improvement = 10*log10(114.8/15.8) = 8.6 dB
+```
+
+Predicted 8.6, measured 7.3. **A pad can never return more than the margin by
+which the receiver's own noise was dominating.** Usable range went 910 m to
+1850 m, the 1.9x that 8.6 dB predicts at 30.5 dB/decade.
+
+**And the other end of the trade, from 9 metres with no pad:**
+
+| | |
+|---|---|
+| events logged in 26 s | **2925** |
+| distinct channels lit | **1360** |
+| flagged `overload` | 2590 |
+| identified as harmonics | 1042 |
+| real signal SNR | **55.4 dB — down from 66.5 with 20 dB of pad** |
+| real signal duration | **6.67 s and 4.02 s, from two ~20 s holds** |
+
+More input producing less SNR is compression, unambiguously. **Overload does not
+corrupt everything equally**: the tone decoded correctly (DCS 072 and 073, both
+right, on a signal this far into compression) and the frequency was right. What
+it destroyed was **level and duration** — which are precisely what an airtime
+survey exists to measure.
+
+Note also that the real transmission was flagged `overload=0`. The 2590 flags
+landed on the phantoms; the one event most corrupted by the overload is the one
+that does not say so.
+
+**So both ends of the attenuation trade now have measured failures:**
+
+| pad | failure |
+|---|---|
+| 20 dB | misses a 5 W handheld at 492 m |
+| 0 dB | 2925 phantom events from one keyup at 9 m, real signal compressed |
+
+That is the case for the 5 dB Phase 1 measured, and it is now bounded on both
+sides by data rather than by one measurement and an argument.
+
+**A methodological note worth keeping.** The DCS half of this walk was labelled
+from an inferred code mapping, and a later "correction" shifted every DCS point
+by one position. Both mappings produced plausible fits — 30.5 and 22.3 dB per
+decade. Choosing between them by fit quality would have been circular. It was
+settled by the manufacturer's spec sheet, with a mapping-independent
+cross-check in the meantime: the CTCSS-only points gave 34.9 dB per decade and
+the earlier all-CTCSS walk 30.4, which bracket the correct mapping and exclude
+the wrong one. The confirmed table is in `docs/tools.md`.
+
 ### Outstanding for Gate 2
 
 - [ ] Zero overflows for an hour at 10 MSPS — needs the threading or optimisation work

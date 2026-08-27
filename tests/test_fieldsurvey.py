@@ -115,6 +115,34 @@ class PointsFile(support.TempDirCase):
             fs.read_points(self.write("lat,lon\n42.1,-71.1\n"))
 
 
+class RockyTalkieMapping(unittest.TestCase):
+    """Privacy code to signalling, from the manufacturer's sheet.
+
+    Anchored on PT 39 = DCS 023, PT 45 = DCS 047, PT 50 = DCS 072. The CTCSS
+    half is what the tool resolves; the DCS half is recorded in docs/tools.md
+    because it is the radio's property, not the deck's.
+    """
+
+    def test_ctcss_half_matches_the_sheet(self):
+        # PT 1-38 are the standard tones in order.
+        self.assertEqual(fs.tone_for_code(1), 67.0)
+        self.assertEqual(fs.tone_for_code(31), 192.8)
+        self.assertEqual(fs.tone_for_code(32), 203.5)
+        self.assertEqual(fs.tone_for_code(37), 241.8)
+        self.assertEqual(fs.tone_for_code(38), 250.3)
+
+    def test_dcs_is_kept_out_of_the_ctcss_namespace(self):
+        """PT 39 upward is DCS and must never resolve to a tone.
+
+        Asking for a tone above 38 is a category error — the answer is a
+        codeword, and which codeword depends on the radio.
+        """
+        with self.assertRaises(SystemExit):
+            fs.tone_for_code(39)
+        with self.assertRaises(SystemExit):
+            fs.tone_for_code(50)
+
+
 class Geometry(unittest.TestCase):
 
     def test_distance_against_a_known_pair(self):
