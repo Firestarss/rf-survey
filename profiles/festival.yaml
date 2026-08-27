@@ -39,18 +39,22 @@ receivers:
     # 0-45 dB control filling LNA, then MIX, then VGA — not a 0-21 linearity
     # control, whatever the Airspy documentation suggests.
     #
-    # 39 is the LOWEST gain that is still linear on this chain. padcal reads
-    # `edge` at 30 and 33 and `inconclusive` at 36, meaning the converter's own
-    # noise is swamping the antenna's; 39, 42 and 45 all read linear and all
-    # give the same +8.1 dB antenna-vs-dummy delta, because above the knee gain
-    # amplifies both noises equally. Taking the lowest of the three leaves the
-    # most headroom for somebody keying beside the antenna.
+    # 42 is the LOWEST gain still linear on THIS antenna. It was 39 on the
+    # Nagoya NA-701; swapping to the Signal Stick moved it, because that antenna
+    # delivers less ambient noise here (13.1x the receiver's own against 17.3x)
+    # and so needs more gain to clear the converter's knee. padcal reads `edge`
+    # at 30 and 33 and `inconclusive` at 36 and 39; 42 and 45 read linear and
+    # both give the same +7.3 dB delta, because above the knee gain amplifies
+    # the receiver's noise and the antenna's equally.
     #
-    # It does NOT avoid adjacent-channel splatter. Measured the same evening: a
+    # The lesson worth keeping: the working gain is a property of the antenna,
+    # not of the radio. Re-run tools/padcal.py after ANY antenna change.
+    #
+    # It does NOT avoid adjacent-channel splatter. Measured 2026-08-27: a
     # handheld at 2-3 m peaking above ~62 dB SNR puts DCS-carrying skirts on the
     # channels +/-25 kHz away at gain 39 and gain 42 alike. That is a received
     # level threshold, not a gain one, and the fix has to be in analysis.
-    gain: 39
+    gain: 42
     # Measured Phase 1, 2026-08-26, against three independent references: an FRS
     # handheld across all 7 channels (-0.644), a licensed transmitter on exactly
     # 464.000000 MHz (-0.65), and a tinySA Ultra generator (-0.41, the outlier —
@@ -77,7 +81,20 @@ receivers:
     # 36 `inconclusive` on this chain, i.e. below the converter's noise knee.
     # 39 is the lowest honest gain now that only 5 dB is fitted.
     attenuator_db: 5
-    antenna: null                 # TODO: record what is actually screwed on
+    # Signal Stick, fitted 2026-08-27, replacing the Nagoya NA-701 which left
+    # with the operator. Recorded because it is not a cosmetic detail: it moved
+    # the lowest usable gain from 39 to 42 and the external-noise ratio from
+    # 17.3x to 13.1x, both measured the same evening on the same radio and pad.
+    antenna: "Signal Stick"
+
+    # What the floor reads at `gain` above with the antenna REMOVED and a 50 ohm
+    # terminator fitted — measured 2026-08-27. Used only to warn: a dummy load
+    # and a very quiet band look identical to the deck, and on 2026-08-27 a
+    # multi-day unattended run was started into a terminator left on after a
+    # padcal sweep. Valid only at the gain it was measured at; a --gain override
+    # skips the check.
+    dummy_floor_dbfs: -112.4
+    dummy_floor_gain: 42
     usb_bus: 4                    # Bus 004 Port 1, xhci-hcd, 480M. vhf must not
                                   # land on this one — confirm with lsusb -t
 

@@ -792,9 +792,9 @@ the gate asks for 24 hours of nobody touching it.
 
 ```
 unit      rfsurvey@uhf, enabled, Restart=on-failure, StartLimitBurst 30/30min
-chain     antenna -> adaptor -> Flamingo -> 2 dB -> 3 dB -> cable -> Airspy
+chain     Signal Stick -> adaptor -> Flamingo -> 2 dB -> 3 dB -> cable -> Airspy
 radio     637862dc2e4c6dd7, USB bus 4
-tuning    466.0 MHz parked, 10 MSPS, gain 39, ppm 0.64
+tuning    462.8 MHz parked, 2.5 MSPS, gain 42, ppm 0.64
 detect    on 10.0 / off 6.0 dB, min 0.12 s, hang 0.30 s  (correct for the
           first time on a 10 MSPS run — see the frame/MTU fix above)
 database  data/phase4.sqlite, run 2
@@ -823,6 +823,98 @@ the number the deployment decision needs.
 - whether `on_db = 10.0` is right against real traffic, which is the gate's own
   question and has never been answered against anything but synthetic signals
 
+### False start: three hours of measurements taken into a dummy load
+
+`tools/padcal.py` ends its sweep with the operator having fitted a 50 ohm
+terminator, and nothing told him to put the antenna back. Everything measured
+after it went into that terminator: the "nothing unexplained in the spectrum"
+survey, all four Gate 1 clipping runs, and the first start of this Phase 4 run.
+
+**Caught by the event rate**, not by any check: zero events in ninety seconds on
+a chain more sensitive than the one that had produced 12000 events/hour. The
+confirmation was already in the logs — the spectrum survey reported a band
+reference level of -104.7... -112.2 dB, and padcal had just measured that same
+gain at -104.2 antenna and -112.3 dummy.
+
+**What it invalidated:** the Gate 1 clipping result (`clip 0, desense 0` proves
+nothing into a terminator — that row is re-opened), the spectrum survey, and the
+opening `front end linear` verdict.
+
+**What survived:** padcal itself, which swaps both loads explicitly; the
+frame/MTU arithmetic; and the DCS 074 decode, which is an identification rather
+than a level.
+
+**And it explained something previously written down as unexplained.** Two
+gain-39 runs peaked at 60.6 and 64.7 dB with everything recorded about them
+identical. That was attributed here to the operator having moved; he had not,
+and said so. Coupling into a terminator is leakage, which depends sharply on
+exactly how a handheld is held — 4 dB between takes is expected there and would
+be odd through an antenna. The operator's pushback was right and the explanation
+offered him was wrong.
+
+Two guards added, because "be more careful" is not a mechanism:
+
+- padcal now prints `*** THE DUMMY LOAD IS STILL FITTED — REFIT THE ANTENNA ***`
+  before its results, where it cannot be missed in the scroll.
+- The deck checks its own floor against `dummy_floor_dbfs` in the profile once
+  per window and warns when the antenna appears to be contributing nothing. A
+  warning, never a refusal — a genuinely quiet site is possible, and a deck that
+  will not run in a field because it disagrees with a config value is worse than
+  one that logs a loud line and continues.
+
+### The antenna changed, and so did the working gain
+
+The NA-701 left with the operator; a Signal Stick replaced it. Re-measured
+immediately, which turned out to matter:
+
+| | NA-701 | Signal Stick |
+|---|---|---|
+| delta at 5 dB pad | +8.1 dB | **+7.3 dB** |
+| external / receiver noise | 17.3x | **13.1x** |
+| lowest linear gain | 39 | **42** |
+| pad the rule wants | 5 dB | 2-4 dB |
+
+**The working gain is a property of the antenna, not the radio.** Gain 39,
+measured and committed to the profile hours earlier, reads `inconclusive` on
+this antenna. Re-run padcal after any antenna change.
+
+The 5 dB pad is kept though the rule prefers 2-4: the difference is 7.3 dB of
+delta against 8.8, under a dB of system noise, and overload is the failure this
+project has measured as the more damaging one.
+
+One padcal bug noted and not fixed: it printed `FIT 4 dB (anything from 2 to
+4 dB satisfies the rule)` and then `Currently fitted: 5 dB (already right)`.
+
+**A failure mode worth recognising.** The first Signal Stick sweep was run with
+the antenna never removed, so both halves measured the same load. It returned
+delta +0.2 dB and "external noise 0.5x the receiver's own" — which reads as a
+plausible very-quiet-site result rather than an error. Measuring one load twice
+looks like a real measurement.
+
+### Gate 2, measured under real traffic at last
+
+The run started at 10 MSPS on the corrected chain and could not keep up:
+
+```
+  10 MSPS   120.5 fps against target 153   overflow 207   16169 events/hr
+   2.5 MSPS  76.3 fps against target 76    overflow   0    4320 events/hr
+```
+
+26% short, sustained, with overflows climbing continuously. **This is the honest
+answer to the question this run was partly meant to ask, and it took five
+minutes rather than three weeks.**
+
+So the unattended run drops to 2.5 MSPS. Overflows are dropped samples and
+dropped samples corrupt level and duration, which are the two things an airtime
+survey exists to measure; three weeks of 26%-lossy data over 10 MHz is worth
+less than three weeks of clean data over 2.5 MHz. Centred 462.800 rather than
+466.000 — the span 461.55-464.05 holds every FRS/GMRS output channel plus the
+whole periodic-emitter cluster this run is meant to identify, and gives up the
+467.x repeater inputs that Phase 7 needs and this gate does not.
+
+Gate 2 still needs analysis in a separate process before 10 MSPS is deployable,
+and the festival needs 10 MSPS for repeater pairing.
+
 ### Known limitations of this run, recorded before it produces anything
 
 - **One radio.** Phase 6 needs a second notch filter and a second antenna,
@@ -834,3 +926,16 @@ the number the deployment decision needs.
 - **Step 10 of Gate 1 was skipped** — pads A/B on the MiniSA. Deliberate: padcal
   cross-checked the fitted 5 dB against Phase 1's independent 17.3x fit, and the
   hour was better spent elsewhere.
+- **The Gate 1 clipping test is re-opened and could not be redone** — it needs a
+  transmitter keyed beside the antenna and the operator had to leave. The only
+  version of it that exists was measured into a terminator and is worthless. It
+  is the first thing to do on return, and until it is done there is no evidence
+  that the 5 dB pad survives somebody keying next to the deck.
+- **Gain 42 is the lowest linear setting on this antenna**, so there is no
+  headroom below it. On the NA-701 there was 3 dB.
+
+### First thing on return
+
+1. Redo the Gate 1 clipping test — handheld at 2-3 m, high power, antenna fitted.
+2. Identify the periodic emitters from the captured audio.
+3. Gate 2: analysis in a separate process, which is what 10 MSPS needs.

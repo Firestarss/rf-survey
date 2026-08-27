@@ -114,6 +114,11 @@ COMPRESSION_SECONDS = 0.5       # per gain point
 # describes. Asking for more than the device has would either clamp silently and
 # make two probe points identical, or throw.
 MAX_GAIN_DB = 45.0
+# How far above the antenna-removed floor the band must sit before the antenna
+# is believed to be connected. The two antennas measured on 2026-08-27 lifted
+# the floor 7.3 and 8.1 dB at their working gains, so 3 dB is comfortably below
+# any real antenna and comfortably above measurement scatter.
+ANTENNA_MISSING_DB = 3.0
 # Analysis has three different dwell requirements, not one, so it has three
 # constants. Measured against synthetic signals by sweeping dwell (see
 # docs/handoff.md); every number below is the knee of a measured curve.
@@ -1582,6 +1587,10 @@ def load_receiver_config(profile_path, receiver_id):
         # v2 and no real run has ever filled them in.
         "attenuator_db": rx.get("attenuator_db"),
         "antenna": rx.get("antenna"),
+        # Antenna-removed reference for check_antenna(). Optional: a receiver
+        # that has never been measured with a terminator simply skips the check.
+        "dummy_floor_dbfs": rx.get("dummy_floor_dbfs"),
+        "dummy_floor_gain": rx.get("dummy_floor_gain"),
     }
 
 
@@ -1982,6 +1991,7 @@ class CaptureLoop:
         self.window_id = None
         self.window_t0 = time.time()    # replaced per window; defined for finish()
         self.stalled = 0
+        self._antenna_checked = True    # armed by open_window, per window
 
         self.overflows = 0
         self.events_logged = 0
@@ -2064,6 +2074,46 @@ class CaptureLoop:
               + (f", {dwell_s:.0f} s" if dwell_s else "")
               + " ==")
         self.check_linearity()
+        self._antenna_checked = False
+
+    def check_antenna(self):
+        """Warn if the front end looks terminated rather than connected.
+
+        A dummy load and a very quiet band are indistinguishable to the deck:
+        both are just a low, flat noise floor. On 2026-08-27 a multi-day
+        unattended survey was started with a 50 ohm terminator still screwed on
+        after a padcal run, along with a Gate 1 clipping test and a spectrum
+        survey, and all of it had to be discarded. Nothing in the software
+        objected, because nothing was watching for it.
+
+        `dummy_floor_dbfs` in the profile is what the floor reads with the
+        antenna removed, measured at that receiver's configured gain. Within
+        `ANTENNA_MISSING_DB` of it means the antenna is contributing nothing
+        that the receiver's own noise is not already making. Comparison is only
+        valid at the gain it was measured at, so a gain override skips it.
+
+        A warning, never a refusal: a genuinely quiet site is possible, and a
+        deck that declines to run in a field because it disagrees with a number
+        in a config file is worse than one that logs a loud line and gets on
+        with it.
+        """
+        expect = self.settings.get("dummy_floor_dbfs")
+        if expect is None or self.args.simulate:
+            return
+        if abs(float(self.settings["gain"]) - float(
+                self.settings.get("dummy_floor_gain", self.settings["gain"]))) > 0.01:
+            return
+        if self.det.floor.value is None:
+            return                  # still warming up; try again next frame
+        self._antenna_checked = True
+        floor = float(np.median(self.det.floor.value))
+        if floor - float(expect) < ANTENNA_MISSING_DB:
+            print(f"   ** FLOOR AT {floor:.1f} dB, and this receiver reads "
+                  f"{float(expect):.1f} dB with the antenna REMOVED.\n"
+                  f"      Either the antenna is disconnected or the site is "
+                  f"extraordinarily quiet. Check the connector before\n"
+                  f"      trusting anything this run records.",
+                  file=sys.stderr)
 
     def check_linearity(self):
         """Confirm the front end is linear on this window before surveying it.
@@ -2135,6 +2185,8 @@ class CaptureLoop:
         frame_start = self.ring.written
         self.ring.push(samples)
         self.stat_frames += 1
+        if not self._antenna_checked:
+            self.check_antenna()
 
         t0 = time.perf_counter()
         psd = self.periodogram(samples)

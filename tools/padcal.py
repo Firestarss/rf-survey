@@ -172,6 +172,12 @@ def main():
         ant = sweep(sdr, SoapySDR, grid, per, rate, gains, args.seconds, "antenna")
         pause("\n  Now fit the DUMMY LOAD", args.wait)
         dum = sweep(sdr, SoapySDR, grid, per, rate, gains, args.seconds, "dummy load")
+        # This procedure ends with a 50 ohm terminator screwed to the front end,
+        # and the deck cannot tell that from a very quiet band. On 2026-08-27 a
+        # multi-day unattended survey was started into one, along with a Gate 1
+        # clipping test and a "nothing unexplained in the spectrum" survey, all
+        # of which had to be thrown away. Say so before anything else prints.
+        print("\n  *** THE DUMMY LOAD IS STILL FITTED — REFIT THE ANTENNA ***")
     finally:
         sdr.deactivateStream(sdr._pad_stream)
         sdr.closeStream(sdr._pad_stream)
