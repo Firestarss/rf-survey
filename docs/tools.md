@@ -95,11 +95,13 @@ strong signal is an obstruction, not a range limit, and the tool calls those out
 separately with their bearings so you can compare them against the paths that
 worked.
 
-#### Rocky Talkie, confirmed against its spec sheet
+#### Rocky Talkie, from the manufacturer's sheet
+
+**Codes 1–38 are CTCSS**, the standard 38 tones in order — 1 = 67.0 through
+38 = 250.3. **Code 39 upward is DCS:**
 
 | privacy code | signalling |
 |---|---|
-| 1–38 | CTCSS, the standard 38 tones in order (1 = 67.0 … 38 = 250.3) |
 | 39 | DCS 023 |
 | 40 | DCS 025 |
 | 41 | DCS 026 |
@@ -108,29 +110,41 @@ worked.
 | 44 | DCS 043 |
 | 45 | DCS 047 |
 | 46 | DCS 051 |
+| 47 | DCS 054 |
+| 48 | DCS 065 |
+| 49 | DCS 071 |
 | 50 | DCS 072 |
+| 51 | DCS 073 |
+| 52 | DCS 074 |
+| 53 | DCS 114 |
+| 54 | DCS 115 |
+| 55 | DCS 116 |
+| 56 | DCS 125 |
+| 57 | DCS 131 |
+| 58 | DCS 132 |
+| 59 | DCS 134 |
 
-Anchored on PT 39 = 023, PT 45 = 047 and PT 50 = 072 from the manufacturer's
-sheet. The first two are six steps apart in the standard DCS list with 036
-excluded, which fixes 39–46 exactly. **PT 50 does not fit that same arithmetic** —
-position 12 would be 071 — so the list drops one code somewhere between 051 and
-072. Unknown which, and it does not matter below PT 47.
+**The list is not the full standard DCS set — it omits 053 and 122.** That is
+what makes it worth writing down rather than deriving: 053 sits between 051 and
+054 in every standard listing, and assuming it is present shifts everything from
+code 47 onward by one.
 
-**This was got wrong once, in a way worth remembering.** The mapping was first
-inferred from the order the codes came back in, then "corrected" by a derivation
-from PT 50 that shifted every DCS point by one position. Both candidate mappings
-produced a plausible-looking fit; the wrong one gave 22.3 dB per decade against
-the right one's 30.5.
+**This was got wrong once, and the way it went wrong is the lesson.** The
+mapping was first inferred from the order codes came back in, then "corrected"
+by a derivation from PT 50 that assumed the standard list and shifted every DCS
+point by one position. Both candidates produced a plausible-looking fit — 30.5
+dB per decade against 22.3.
 
-Choosing between them **by which fit looked better would have been circular** —
-that is selecting the labelling that flatters the model. What actually decided it
-was the manufacturer's sheet, with a mapping-independent cross-check in the
-meantime: the CTCSS-only points, whose labels do not depend on the DCS list at
-all, gave 34.9 dB per decade, and an earlier all-CTCSS walk gave 30.4. Those
-bracket the correct mapping and exclude the wrong one.
+Choosing between them **by which fit looked better would have been circular**:
+that is selecting the labelling that flatters the model. What was available in
+the meantime was a mapping-independent cross-check — the CTCSS-only points,
+whose labels do not depend on the DCS list at all, gave 34.9 dB per decade, and
+an earlier all-CTCSS walk gave 30.4. Those bracket the correct mapping and
+exclude the wrong one. The spec sheet then settled it outright.
 
-If you use a different radio, **get its table from the manufacturer** and add it
-here. Do not derive it from a survey you are trying to analyse.
+**Get the table from the manufacturer.** Do not derive it from the survey you
+are trying to analyse, and do not assume the standard DCS list — this radio
+proves they are not all the same.
 
 #### Codes past 38 are DCS, and the numbering is the manufacturer's
 
