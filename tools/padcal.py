@@ -100,6 +100,31 @@ def linear_gains(floors, gains):
     return verdicts
 
 
+def pause(message, wait):
+    """Wait for the operator to swap the load.
+
+    Three ways in, because this tool is used three ways. At a terminal, enter.
+    Run without a keyboard on stdin — `!` from inside Claude Code, `ssh host cmd`,
+    a cron entry — stdin is closed and input() raises EOFError immediately, which
+    used to abort the run after the radio was already streaming. /dev/tty still
+    reaches the terminal in most of those cases, so try it first. Where even that
+    is absent, fall back to a timed countdown: this is a field tool, and someone
+    holding an antenna in one hand cannot press enter anyway.
+    """
+    try:
+        with open("/dev/tty") as tty:
+            print(message + " [enter] ", end="", flush=True)
+            tty.readline()
+            return
+    except (OSError, EOFError):
+        pass
+    print(f"{message} — {wait:.0f} s")
+    for left in range(int(wait), 0, -1):
+        print(f"\r    {left:3d} ", end="", flush=True)
+        time.sleep(1)
+    print("\r         \r", end="", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Measure the attenuation this site and antenna want.",
@@ -112,6 +137,9 @@ def main():
     ap.add_argument("--pad", type=float, required=True,
                     help="attenuation physically fitted right now, in dB")
     ap.add_argument("--gains", default="30,33,36,39,42,45")
+    ap.add_argument("--wait", type=float, default=20.0,
+                    help="seconds to allow for swapping the load when there is "
+                         "no keyboard attached (see pause())")
     ap.add_argument("--seconds", type=float, default=4.0,
                     help="per gain, per load (default 4)")
     args = ap.parse_args()
@@ -140,9 +168,9 @@ def main():
     sdr._pad_stream = sdr.setupStream(RX, SoapySDR.SOAPY_SDR_CF32)
     sdr.activateStream(sdr._pad_stream)
     try:
-        input("\n  Fit the ANTENNA, then press enter... ")
+        pause("\n  Fit the ANTENNA", args.wait)
         ant = sweep(sdr, SoapySDR, grid, per, rate, gains, args.seconds, "antenna")
-        input("\n  Now fit the DUMMY LOAD, then press enter... ")
+        pause("\n  Now fit the DUMMY LOAD", args.wait)
         dum = sweep(sdr, SoapySDR, grid, per, rate, gains, args.seconds, "dummy load")
     finally:
         sdr.deactivateStream(sdr._pad_stream)

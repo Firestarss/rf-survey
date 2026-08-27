@@ -51,13 +51,22 @@ receivers:
     # Applied to the tune request, not via setFrequencyCorrection: SoapyAirspy
     # reports hasFrequencyCorrection() == False and silently ignores it.
     ppm: 0.64
-    # MEASURED TARGET 5 dB, not 20. Phase 1 step 11, 2026-08-26. Both windows on
-    # this receiver agree, which is why they are grouped here: 466 measured 21x
-    # external-to-receiver noise (wants 4-6 dB) and 446 measured 18x (wants
-    # 3-5 dB). 20 dB leaves an antenna-vs-dummy delta of 0.7 dB where 8-10 is
-    # wanted. Currently 2x 10 dB stacked because that is what is on hand; fit a
-    # single 5 dB pad when the kit arrives.
-    attenuator_db: 20
+    # MEASURED AND FITTED, 5 dB. Phase 1 step 11, predicted 2026-08-26 and
+    # confirmed on hardware 2026-08-27 once the attenuator kit arrived:
+    # antenna-vs-dummy delta +8.0 to +8.3 dB across gains 39/42/45, against 8.1
+    # predicted, and external noise re-derived at 17.3x the receiver's own —
+    # the same figure Phase 1 fitted from the 20/10/0 dB configurations, so two
+    # independent measurements agree.
+    #
+    # Physically this is 2 dB + 3 dB stacked, not a single part. Phase 1 argued
+    # for one pad to halve the connector count; the kit does not contain a 5,
+    # so the stack stands. If a single 5 dB part is ever bought, it is a
+    # like-for-like swap and needs no re-measurement.
+    #
+    # Do NOT lower gain below 39 to buy headroom: 30 and 33 measure `edge` and
+    # 36 `inconclusive` on this chain, i.e. below the converter's noise knee.
+    # 39 is the lowest honest gain now that only 5 dB is fitted.
+    attenuator_db: 5
     antenna: null                 # TODO: record what is actually screwed on
     usb_bus: 4                    # Bus 004 Port 1, xhci-hcd, 480M. vhf must not
                                   # land on this one — confirm with lsusb -t

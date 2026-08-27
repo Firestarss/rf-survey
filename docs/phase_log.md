@@ -266,11 +266,44 @@ detail. The two with consequences beyond Phase 1:
   from `vhf` to `uhf`, because no single pad serves a receiver spanning a 4 dB need and a
   20 dB one
 
+**Step 11 closed 2026-08-27 — the 5 dB pad fitted and measured. PASS.**
+
+The attenuator kit arrived and the chain is now
+`antenna -> adaptor -> Flamingo -> 2 dB -> 3 dB -> cable -> Airspy`. Measured with
+`tools/padcal.py`, which is the same procedure Phase 1 ran by hand:
+
+| gain | antenna | dummy | delta | state |
+|---|---|---|---|---|
+| 30 | -130.8 | -131.4 | +0.6 | edge |
+| 33 | -129.3 | -130.9 | +1.5 | edge |
+| 36 | -122.8 | -128.7 | +5.9 | inconclusive |
+| 39 | -113.8 | -122.1 | **+8.3** | linear |
+| 42 | -104.2 | -112.3 | **+8.1** | linear |
+| 45 | -94.5 | -102.5 | **+8.0** | linear |
+
+**Predicted 8.1 dB, measured 8.0-8.3 dB.** The delta is flat across 6 dB of gain,
+which is the Phase 1 finding reproduced: above the knee the ratio does not depend
+on gain. External noise re-derives at **17.3x the receiver's own** — the identical
+figure Phase 1 fitted from the 20/10/0 dB configurations on a different day with
+different parts. Two independent measurements, one answer.
+
+**Gain 39 is now the floor, and that kills an assumption.** With 20 dB fitted, gain
+30 was a usable setting and it was where overflows went to zero. With 5 dB fitted,
+30 and 33 read `edge` and 36 `inconclusive` — the pad no longer holds the antenna
+noise above the converter's own. **So there is no route to Gate 2 by desensing.**
+The throughput problem has to be solved rather than avoided, and the long run will
+be *busier* than the 11933 events/hour already measured, because the chain is now
+7.6 dB more sensitive than the 20 dB / gain 42 configuration those came from.
+
+Physically this is 2 dB + 3 dB stacked. Phase 1 argued for a single part to halve
+the connector count; the kit has no 5, so the stack stands and the measurement
+above is of the stack as built.
+
 **Outstanding for Gate 1**
 
 - [x] Notch filter measured (step 9) — done 2026-08-26, PASS
 - [ ] Both pads measured and labelled A/B, difference recorded (MiniSA, step 10)
-- [~] Antenna-versus-dummy measured (step 11) — 2026-08-26. Needs a 5 dB pad, on order
+- [x] Antenna-versus-dummy measured (step 11) — closed 2026-08-27, +8.1 dB, PASS
 - [x] ppm confirmed against the MiniSA generator (step 12) — done 2026-08-26
 - [ ] Everything in the spectrum accounted for (step 13) — provisional survey done
       2026-08-26 and no intermodulation found, but the gate wants the final pad fitted
@@ -466,6 +499,37 @@ produced **11040 events/hour** at gain 42 and almost none at gain 30. Those
 thresholds have never been tuned against real traffic — they were set from
 synthetic signals — and Phase 4 is where that happens. It is likely that the
 honest fix here is a threshold, not a thread.
+
+> **Corrected 2026-08-27 — the sentence above is wrong.** Re-examining
+> `data/gym.sqlite` (12799 events, 191 channels, one 4001 s window, zero overload
+> flags, 57 harmonics) shows the rate is not threshold junk but real periodic
+> traffic, and no threshold removes it:
+>
+> | `on_db` | events/hr |
+> |---|---|
+> | 10.0 | 3966 |
+> | 18.0 | 3042 |
+> | 25.0 | 2291 |
+>
+> Fifteen dB of sensitivity thrown away buys a 42% reduction. The reason is
+> visible in the timestamps — the busiest channels are **periodic emitters with
+> stable per-channel phase**, which noise does not do:
+>
+> ```
+>   462.125   ...357.11  419.29  481.88  542.57    period 62.2, 62.6, 60.7 s
+>   463.625   ...361.39  423.57  486.03  546.51    period 62.2, 62.5, 60.5 s
+>   462.075   ...362.09  424.25  486.72  547.15    period 62.2, 62.5, 60.4 s
+> ```
+>
+> About twenty channels across 461-470 MHz sending 4 s bursts once a minute at
+> ~20 dB SNR, each on its own fixed offset, plus a second family (463.900,
+> 462.050, 462.500, 470.2625, 464.250) doing 0.17 s bursts every 9.53 s with a
+> gap CV of 0.07-0.20. What they *are* is unidentified — UHF telemetry of some
+> kind — and captured audio is what would settle it.
+>
+> **So the analysis thread is continuously busy in Boston by right, and the
+> 10 MSPS throughput problem cannot be tuned away.** Whether a festival site is
+> quieter than a Boston rooftop is plausible and unproven.
 
 ### 2026-08-27, evening: the first propagation data this project has
 
