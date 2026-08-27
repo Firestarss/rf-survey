@@ -1656,6 +1656,7 @@ class Radio:
         self.OVERFLOW = self.api.SOAPY_SDR_OVERFLOW
         self._cf32 = self.api.SOAPY_SDR_CF32
         self.stream = None
+        self.mtu = None
 
     def configure(self, settings):
         """Apply the settings. Returns the rate and centre the device accepted."""
@@ -1694,6 +1695,14 @@ class Radio:
     def start(self):
         self.stream = self.dev.setupStream(self.RX, self._cf32)
         self.dev.activateStream(self.stream)
+        # The driver decides how much a single read can return, and asking for
+        # more does not get it: SoapyAirspy reports 65536 and getStreamArgsInfo
+        # offers nothing to change it. Recorded here because the frame size has
+        # to agree with it — see CaptureLoop.__init__.
+        try:
+            self.mtu = int(self.dev.getStreamMTU(self.stream))
+        except Exception:
+            self.mtu = None
 
     def read(self, buf, n):
         """Samples into `buf`. Returns the count, or <= 0 for a timeout."""
@@ -1889,7 +1898,24 @@ class CaptureLoop:
         self.run_id = run_id
         self.rate = rate
 
+        # frame_size() picks the FFT length the analysis wants; the driver
+        # decides what a read actually returns. At 10 MSPS those disagree —
+        # frame_size asks for 131072 and SoapyAirspy hands back 65536 — and
+        # every frame-counted threshold was computed from the number we do not
+        # get. min_duration_s 0.12 became 0.059 and hang_s 0.30 became 0.151,
+        # so the two settings that decide what counts as an event were running
+        # at half their configured values on 10 MSPS runs and correctly on
+        # 2.5 MSPS ones, where 32768 fits inside the MTU. Measured 2026-08-27:
+        # 898 of gym.sqlite's 12799 events are shorter than the 0.12 s minimum
+        # that was supposedly in force.
+        #
+        # Clamping here rather than fixing the thresholds keeps one definition
+        # of a frame: what a read returns, what the detector counts, and what
+        # `fps (target N)` compares against are now the same number.
         self.fs = frame_size(rate)
+        mtu = getattr(radio, "mtu", None)
+        if mtu:
+            self.fs = min(self.fs, mtu)
         self.frame_seconds = self.fs / rate
         self.chunk = np.empty(self.fs, np.complex64)
         self.periodogram = Periodogram(rate)
@@ -1926,6 +1952,7 @@ class CaptureLoop:
         self.overflows = 0
         self.events_logged = 0
         self.analyses = 0
+        self.analyses_total = 0     # _stats() resets self.analyses; this survives
         self.detect_ms = 0.0
         self.analyze_ms = 0.0
         self.stat_frames = 0
@@ -2225,6 +2252,7 @@ class CaptureLoop:
             if result is None:
                 continue
             self.analyses += 1
+            self.analyses_total += 1
             self.log.apply(row, result, freq_hz)
             if self.store is not None:
                 self.log.attach_capture(row, *self.store.write(
@@ -2299,7 +2327,7 @@ class CaptureLoop:
 
         print(f"\nstopped. overflows: {self.overflows}  "
               f"events: {self.events_logged}  "
-              f"analysed: {self.analyses}  "
+              f"analysed: {self.analyses_total}  "
               f"skipped: {self.worker.skipped}  "
               f"harmonics: {self.harmonics_found}  "
               f"clip frames: {self.overload.clip_frames}  "
@@ -2375,6 +2403,10 @@ def run(args):
                          attenuator_db=settings["attenuator_db"],
                          antenna=settings["antenna"])
 
+    # Before CaptureLoop, not after: the loop sizes its frame against the
+    # stream's MTU and cannot ask for it until the stream exists.
+    radio.start()
+
     loop = CaptureLoop(radio, settings, args, conn, run_id, rate, center)
     print(f"ring buffer {loop.ring_seconds*rate*8/1e6:.0f} MB\n")
     if loop.store is not None:
@@ -2382,7 +2414,6 @@ def run(args):
               f"under {loop.store.root}, budget {args.capture_mb:.0f} MB")
     print(f"run {run_id}, serial {serial}, profile {args.profile}")
 
-    radio.start()
     return loop.go(windows)
 
 

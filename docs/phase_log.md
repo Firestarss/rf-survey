@@ -299,11 +299,91 @@ Physically this is 2 dB + 3 dB stacked. Phase 1 argued for a single part to halv
 the connector count; the kit has no 5, so the stack stands and the measurement
 above is of the stack as built.
 
+**Clipping with a transmitter beside the antenna — measured 2026-08-27. PASS.**
+
+The one case the phase log had flagged as untested, and the one the 5 dB pad put
+back in question: 20 dB of pad made it academic, 5 dB does not. GMRS handheld,
+channel 20, high power, 2-3 m from the antenna, three ~10 s bursts, four runs.
+
+```
+  clip frames 0    desense frames 0     at gain 39 and gain 42
+```
+
+Three bursts logged at **64.7 / 63.8 / 62.4 dB**, durations 13.5 / 17.6 / 11.9 s
+— full length, none of the truncation the no-pad ride produced. **DCS 074
+decoded on all three**, which is what PT 52 should be on the Rocky Talkie list,
+so the mapping table in `docs/tools.md` gets an independent confirmation.
+
+**Splatter is a level threshold, not a gain one.** The +/-25 kHz skirts appear at
+gain 39 and gain 42 alike whenever the peak clears ~62 dB:
+
+```
+  462.7000  +15.6 dB  DCS 074      <- +25 kHz
+  462.6500  +13.6 dB  DCS 074      <- -25 kHz
+```
+
+One run peaked at 60.6 dB and showed none of it. I attributed that to the
+operator standing further away; he was not, and everything recorded about the
+two runs is identical — same serial, same gain, same centre, same pad. **The
+4 dB difference is unexplained.** What does not depend on it: gain 39 does not
+buy immunity from splatter, so the fix has to be in analysis.
+
+**Gain is now 39 in the profile**, replacing the provisional 12. It is the
+lowest gain padcal still calls linear (30 and 33 read `edge`, 36 `inconclusive`),
+and all of 39/42/45 give the same +8.1 dB delta, so the lowest of them keeps the
+most headroom.
+
+### The frame the deck asks for is not the frame it gets
+
+Chasing a cosmetic-looking `152.6 fps (target 76)` in the stats line found a real
+fault. `frame_size()` picks 131072 samples at 10 MSPS; SoapyAirspy's stream MTU
+returns 65536 and `getStreamArgsInfo` offers nothing to deepen it. The samples
+are handled correctly — `_frame(self.chunk[:ret])` slices to what arrived — but
+`frame_seconds` was computed from the size *requested*, and the detector counts
+its thresholds in frames:
+
+| setting | configured | in force at 10 MSPS |
+|---|---|---|
+| `min_duration_s` | 0.12 s | **0.059 s** |
+| `hang_s` | 0.30 s | **0.151 s** |
+
+Both halved, and **only at 10 MSPS** — at 2.5 MSPS the frame is 32768, fits
+inside the MTU, and the arithmetic is right. Phase 2's detection gate ran at
+2.5 MSPS, which is exactly why it passed every check and never showed this.
+
+Visible in data already collected: **898 of `gym.sqlite`'s 12799 events are
+shorter than the 0.12 s minimum that was supposedly in force** — about 7% of
+that event rate. It does not overturn the periodic-beacon finding above, but
+every 10 MSPS run to date, including both propagation walks, was detecting
+against thresholds that were not the configured ones.
+
+Fixed by clamping the frame to the stream MTU at startup, so one definition of a
+frame serves the reader, the detector and the stats line. Verified on hardware:
+`152.5 fps (target 153)`, zero overflows.
+
+A second counter bug alongside it: the closing summary printed `analysed: 0`
+while eleven events had demonstrably been analysed, because `_stats()` resets
+`self.analyses` every interval and the summary printed that per-interval counter
+as a session total. Split into `analyses_total`.
+
+**Radio 2, read off the device 2026-08-27:**
+
+```
+serial     637862dc2f2f31d7     (uhf is ...2e4c6dd7 — check the whole string)
+usb        Bus 002 Port 1, xhci-hcd, 480M   — different root hub from uhf's bus 4
+firmware   AirSpy NOS v1.0.0-rc10-0-g946184a — identical to radio 1
+power      in0_lcrit_alarm = 0 with both attached, 45.8 C
+```
+
+That is most of Gate 6's power and topology question answered. Phase 6 remains
+blocked on a second notch filter and a second antenna, neither of which exist.
+
 **Outstanding for Gate 1**
 
 - [x] Notch filter measured (step 9) — done 2026-08-26, PASS
 - [ ] Both pads measured and labelled A/B, difference recorded (MiniSA, step 10)
 - [x] Antenna-versus-dummy measured (step 11) — closed 2026-08-27, +8.1 dB, PASS
+- [x] Zero clipping frames at working gain, transmitter nearby — 2026-08-27, PASS
 - [x] ppm confirmed against the MiniSA generator (step 12) — done 2026-08-26
 - [ ] Everything in the spectrum accounted for (step 13) — provisional survey done
       2026-08-26 and no intermodulation found, but the gate wants the final pad fitted

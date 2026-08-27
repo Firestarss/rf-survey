@@ -35,12 +35,22 @@ receivers:
       # would halve coverage of the main band to gain little.
       - {center_hz: 466_000_000, label: "FRS/GMRS/UHF business", dwell_seconds: 300}
       - {center_hz: 446_000_000, label: "70cm ham", dwell_seconds: 60}
-    # STILL PROVISIONAL and known to be too low — step 11 sets it, and step 11
-    # needs the antenna. Measured 2026-08-26: this is an overall 0-45 dB filling
-    # LNA, then MIX, then VGA, and the receiver is ADC-noise-limited below ~36,
-    # so 12 is LNA-only and the least sensitive useful setting there is. A
-    # handheld ten feet away read 9.6 dB SNR here and 48.6 dB at gain 42.
-    gain: 12
+    # MEASURED AND SET, 2026-08-27, with the 5 dB pad fitted. This is an overall
+    # 0-45 dB control filling LNA, then MIX, then VGA — not a 0-21 linearity
+    # control, whatever the Airspy documentation suggests.
+    #
+    # 39 is the LOWEST gain that is still linear on this chain. padcal reads
+    # `edge` at 30 and 33 and `inconclusive` at 36, meaning the converter's own
+    # noise is swamping the antenna's; 39, 42 and 45 all read linear and all
+    # give the same +8.1 dB antenna-vs-dummy delta, because above the knee gain
+    # amplifies both noises equally. Taking the lowest of the three leaves the
+    # most headroom for somebody keying beside the antenna.
+    #
+    # It does NOT avoid adjacent-channel splatter. Measured the same evening: a
+    # handheld at 2-3 m peaking above ~62 dB SNR puts DCS-carrying skirts on the
+    # channels +/-25 kHz away at gain 39 and gain 42 alike. That is a received
+    # level threshold, not a gain one, and the fix has to be in analysis.
+    gain: 39
     # Measured Phase 1, 2026-08-26, against three independent references: an FRS
     # handheld across all 7 channels (-0.644), a licensed transmitter on exactly
     # 464.000000 MHz (-0.65), and a tinySA Ultra generator (-0.41, the outlier —
@@ -72,7 +82,10 @@ receivers:
                                   # land on this one — confirm with lsusb -t
 
   vhf:
-    serial: null                  # TODO Phase 5
+    # Read off the device 2026-08-27, both radios attached. Note how little it
+    # differs from uhf's 637862dc2e4c6dd7 — they diverge only in the last five
+    # characters, so check the whole string, never the prefix.
+    serial: 637862dc2f2f31d7
     mode: rotating
     dwell_seconds: 180
     sample_rate: 10_000_000
@@ -91,7 +104,10 @@ receivers:
     # 17-20 dB, so one pad now serves them.
     attenuator_db: 20
     antenna: null
-    usb_bus: null
+    usb_bus: 2                    # Bus 002 Port 1, xhci-hcd, 480M. Confirmed
+                                  # 2026-08-27 to be a different root hub from
+                                  # uhf's bus 4, with no undervoltage alarm
+                                  # (in0_lcrit_alarm = 0) with both attached.
     windows:
       # 446 moved to the uhf receiver on 2026-08-26. It wants 4-5 dB of
       # attenuation and these two want 17-20 dB; no single pad served all three,
