@@ -5,10 +5,24 @@
 #   sudo systemctl stop  rfsurvey.target
 #
 # The instances list themselves as PartOf= this target, which is what makes the
-# stop propagate. Wants= rather than Requires= so that one radio failing to come
-# up does not take the other down with it - half a survey is worth more than none.
-Description=RF survey deck (both receivers)
-Wants=rfsurvey@uhf.service rfsurvey@vhf.service
+# stop propagate.
+#
+# Deliberately NO Wants= line. It used to name both instances explicitly, and on
+# 2026-08-31 that turned `systemctl enable rfsurvey.target` — which is the
+# documented way to make the survey survive a reboot — into "start both
+# receivers at every boot", including a vhf instance nobody had enabled, on the
+# radio that had a dummy load screwed to it. It ran at 10 MSPS on gain 12,
+# overflowed continuously, took 98% of a core away from the receiver doing the
+# real work, and wrote its run rows into data/survey.sqlite, which holds the
+# synthetic fixtures the test suite depends on.
+#
+# Membership now comes only from `systemctl enable rfsurvey@<instance>`, which
+# drops a symlink in rfsurvey.target.wants/. That way "what starts at boot" has
+# exactly one source of truth and it is the thing an operator actually typed.
+# The cost is that `systemctl start rfsurvey.target` starts only enabled
+# instances rather than every instance that could exist, which is the safer
+# reading of an ambiguous command.
+Description=RF survey deck (enabled receivers)
 
 [Install]
 WantedBy=multi-user.target
