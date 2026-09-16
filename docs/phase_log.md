@@ -939,3 +939,36 @@ and the festival needs 10 MSPS for repeater pairing.
 1. Redo the Gate 1 clipping test — handheld at 2-3 m, high power, antenna fitted.
 2. Identify the periodic emitters from the captured audio.
 3. Gate 2: analysis in a separate process, which is what 10 MSPS needs.
+
+---
+
+## 2026-09-16 — the rust engine, and WildFire readiness
+
+Two receivers at 10 MSPS did not fit on the Python engine: 2,177 and 1,899
+overflows in 6.5 minutes, one radio on a dummy load hearing nothing. The
+per-frame path allocated several half-megabyte arrays every 6.6 ms frame, and
+copied up to ~96 MB of IQ per analysed event on the reader thread.
+
+`engine/` is a Rust reader, spectrum, noise floor and detector for one receiver.
+Python keeps the database, rotation, captures and messages (`src/engine_loop.py`),
+and analysis runs in its own process reading IQ from shared memory. Trusted on:
+
+- `tests/test_engine_equivalence.py`: identical starts and ends, by channel and
+  sample position, against the real Python classes, at both rates, including a
+  centre on the grid where numpy's round-half-to-even matters
+- `tests/test_engine_loop.py`: identical database rows through the whole deck,
+  including tone, DCS, deviation and measured frequency to the hertz
+- hardware, both radios at 10 MSPS through a full rotation: **0 overflows each**
+  under ~22,000 events/hour, 1.8 ms per frame, load 2-3
+
+Found on the way and fixed: two receivers starting together corrupted the schema
+version (a race in `init_schema`, reproduced by a test, fixed with a file lock);
+WildFire's audio would have overwritten Phase 4's by run number; `run()` crashed
+on hand-built argument namespaces; and a file-driven run claimed a real radio's
+serial.
+
+One analysis worker, not two: a second cost the engines headroom and a dropped
+block, and lowering its priority did not buy that back.
+
+Then an overnight soak under the real units, and `tools/wildfire-ready` to report
+it and prepare the deck. Field instructions: `docs/wildfire.md`.

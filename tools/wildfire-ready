@@ -1,0 +1,83 @@
+#!/bin/bash
+# Get the deck ready to unplug and take to WildFire.
+#
+#   sudo ~/rfsurvey/tools/wildfire-ready            stop, report, archive, check, power off
+#   sudo ~/rfsurvey/tools/wildfire-ready --dry-run  report and check only; change nothing
+#
+# The night before, the deck soaks under its real WildFire configuration — the
+# same systemd units, the rust engine, both receivers at 10 MSPS. That soak writes
+# into data/wildfire.sqlite, because that is what the units are configured to use
+# and the point is to test exactly that. This moves it aside so the event starts
+# with an empty database, and reports how the soak went so there is a decision
+# to make before leaving rather than a surprise at camp.
+#
+# Nothing here is needed for the deck to work. Skip it and WildFire's runs land in
+# the same database after the soak's, dated differently, and nothing breaks.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
+if [ "$DRY" = 0 ] && [ "$(id -u)" != 0 ]; then echo "run with sudo (or --dry-run)"; exit 1; fi
+G=/usr/bin/grep
+since=$(cat data/soak-started 2>/dev/null || echo "-12 hours")
+bad=0
+
+echo "== soak since $since =="
+if [ "$DRY" = 0 ]; then
+    echo "stopping the survey cleanly (up to 90 s)..."
+    systemctl stop rfsurvey@uhf rfsurvey@vhf
+fi
+for rx in uhf vhf; do
+    J=$(journalctl -u rfsurvey@$rx --since "$since" --no-pager -o cat 2>/dev/null)
+    starts=$(printf '%s\n' "$J" | $G -c "rust engine\]")
+    last=$(printf '%s\n' "$J" | $G "^\[stats\]" | tail -1)
+    ovf=$(printf '%s\n' "$J" | $G -o "overflow [0-9]*" | awk '{print $2}' | sort -n | tail -1)
+    errs=$(printf '%s\n' "$J" | $G -ciE "traceback|engine exited|engine error|stream delivered nothing")
+    stopped=$(printf '%s\n' "$J" | $G "^stopped\." | tail -1)
+    echo "-- $rx: started $starts time(s), errors $errs, highest overflow count ${ovf:-0}"
+    [ -n "$last" ] && echo "   last stats: $last"
+    [ -n "$stopped" ] && echo "   $stopped"
+    [ "${starts:-0}" -gt 1 ] && { echo "   ** restarted during the soak — read: journalctl -u rfsurvey@$rx --since \"$since\" | grep -B5 -iE 'traceback|exited|error'"; bad=1; }
+    [ "${errs:-0}" -gt 0 ] && bad=1
+    [ "${ovf:-0}" -gt 50 ] && { echo "   ** more than 50 overflows — consider the fallback (see systemd/rfsurvey-$rx.env)"; bad=1; }
+done
+
+echo
+echo "== radios =="
+n=$(lsusb 2>/dev/null | $G -ci airspy)
+echo "Airspys attached: $n"
+[ "$n" -lt 2 ] && { echo "** expected 2"; bad=1; }
+[ -x engine/target/release/rfsurvey-engine ] && echo "rust engine: built" || { echo "** rust engine binary missing: cd engine && cargo build --release"; bad=1; }
+
+echo
+echo "== boot checks =="
+systemd/rfsurvey-preflight 2>&1 || true
+systemd/rfsurvey-preflight 2>&1 | $G -q "^FAIL" && bad=1
+
+if [ "$DRY" = 1 ]; then
+    echo; echo "(dry run: nothing stopped, moved or powered off)"
+    exit $bad
+fi
+
+echo
+stamp=$(date -u +%Y%m%dT%H%MZ)
+dest=data/soak-$stamp
+mkdir -p "$dest"
+moved=0
+for f in data/wildfire.sqlite data/wildfire.sqlite-wal data/wildfire.sqlite-shm data/wildfire.sqlite.schema-lock; do
+    [ -e "$f" ] && mv "$f" "$dest/" && moved=1
+done
+[ -d data/captures/wildfire ] && mv data/captures/wildfire "$dest/captures" && moved=1
+chown -R firestarss:firestarss "$dest" 2>/dev/null
+[ "$moved" = 1 ] && echo "soak data archived to $dest — WildFire starts with an empty database" || rmdir "$dest"
+rm -f data/soak-started
+
+if [ "$bad" = 1 ]; then
+    echo
+    echo "** Something above needs a look. Not powering off. Fix it, or power off"
+    echo "   yourself with: sudo poweroff"
+    exit 1
+fi
+echo
+echo "All good. Powering off in 10 s — Ctrl-C to cancel."
+sleep 10
+poweroff

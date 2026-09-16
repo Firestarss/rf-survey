@@ -79,7 +79,10 @@ RestartSec=10
 # loop cleanly, closes the in-flight events and the coverage window, and ends the
 # run. SIGTERM would kill it mid-transaction and leave the last window open.
 KillSignal=SIGINT
-TimeoutStopSec=30
+# 90 s, not 30. With --engine rust a stop sends "stop" to the engine, takes the
+# close of the last window, then lets queued analyses finish; the orchestrator
+# gives each of those up to 30 s. SIGKILL before that loses the final close.
+TimeoutStopSec=90
 
 # Journald keeps the console output. There is no other operator-visible log, and
 # on a headless deck in a field this is the only way to find out what happened.

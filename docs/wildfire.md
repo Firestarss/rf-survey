@@ -18,6 +18,40 @@ in, **but the pads do not move with the software** — the 5 dB radio and the
 - Both antennas are 2 m / 70 cm dual-band, so either antenna works on either chain.
 - Official 27 W PSU. A phone charger or power bank will limit USB current.
 
+## Before leaving
+
+The deck soaks overnight under its real WildFire configuration. In the morning,
+connected over SSH or Tailscale:
+
+```bash
+sudo ~/rfsurvey/tools/wildfire-ready
+```
+
+It stops the survey cleanly, reports how the soak went, moves the soak's data
+aside so WildFire starts with an empty database, checks both radios are attached
+and the boot checks pass, then powers off. If anything looks wrong it says so
+and does **not** power off. `--dry-run` reports without changing anything.
+
+## The engine
+
+Both receivers run at 10 MSPS on the **rust engine** (`--engine rust`, set in
+`systemd/rfsurvey-<rx>.env`). Measured 2026-09-16 on this profile, both radios:
+
+| | Python engine | rust engine |
+|---|---|---|
+| overflows, 6.5 min | 2,177 and 1,899 | **0 and 0** |
+| frames/s (need 153) | 64-132 | 152.6 |
+| load / temperature | 5.65 / 71.6 C rising | 2-3 / ~65 C |
+
+Under heavy traffic a small share of events are logged without tone analysis
+(8% at Boston's 22,000 events/hour); at a camp that should be close to none.
+
+**Fallback**, if the morning report shows restarts or overflows: in both
+`systemd/rfsurvey-uhf.env` and `systemd/rfsurvey-vhf.env` replace
+`--engine rust` with `--engine python --profile profiles/wildfire-fallback.yaml`.
+That keeps uhf at 10 MSPS and runs vhf at 2.5 MSPS over five narrower windows,
+measured at zero vhf overflows.
+
 ## At camp
 
 1. Antennas on, both chains assembled, radios in the black ports.

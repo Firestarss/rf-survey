@@ -165,6 +165,7 @@ class EngineCaptureLoop:
         self.windows = windows
         self.iq_file = iq_file
         self.shm_path = f"/dev/shm/rfsurvey-{args.receiver_id}-{os.getpid()}.iq"
+        self._remove_stale_rings()
 
         # The analysis process is started before any thread exists, so fork is
         # safe: nothing can be holding a lock at the moment of the copy.
@@ -245,6 +246,35 @@ class EngineCaptureLoop:
         self.running = threading.Event()
         self.running.set()
         signal.signal(signal.SIGINT, lambda *_: self.running.clear())
+
+    def _remove_stale_rings(self):
+        """Delete rings left by processes of this receiver that no longer exist.
+
+        /dev/shm is RAM. A clean stop unlinks the ring, but a crash or SIGKILL
+        does not, and each one is 336 MB at 10 MSPS: a service crash-looping on
+        an unattended deck would eat the machine's memory ring by ring until
+        the OOM killer arrived.
+        """
+        prefix = f"rfsurvey-{self.args.receiver_id}-"
+        for path in pathlib.Path("/dev/shm").glob(f"{prefix}*.iq"):
+            try:
+                pid = int(path.stem[len(prefix):])
+            except ValueError:
+                continue
+            if pid == os.getpid():
+                continue
+            try:
+                os.kill(pid, 0)
+                continue                    # still alive: not ours to remove
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                continue
+            try:
+                path.unlink()
+                print(f"removed stale ring {path} (process {pid} is gone)")
+            except OSError:
+                pass
 
     # -- engine I/O ----------------------------------------------------------
 
