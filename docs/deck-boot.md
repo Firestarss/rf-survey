@@ -155,7 +155,55 @@ Temperature (composite):          50 C
 Temperature Sensor 1:             63 C    <- watch under Black Rock ambient
 ```
 
-**`unsafe_shutdowns` should now move only on a deliberate power pull.** It read
-8 on 2026-08-31 and 11 on 2026-09-16 — three lockups in that fortnight, which is
-the fault running untreated while believed fixed. If it climbs again now that
-APST is off, APST was not the whole story.
+**`unsafe_shutdowns` alone cannot tell a lockup from a power pull**, and that was
+learned the same day. It read 8 on 2026-08-31 and 11 on the morning of
+2026-09-16, then **13 by that afternoon — with APST already disabled.** Taken at
+face value that says APST was not the whole story. It does not say that:
+
+| boot ended | journal ran to the end? | survey at the end | shutdown sequence |
+|---|---|---|---|
+| 06:43:31 | yes, to the final second | 76.3 fps, overflow 0 | none |
+| 08:15:46 | yes, to the final second | 76.3 fps, overflow 0 | none |
+
+Both machines were healthy and writing at the instant power disappeared. The
+APST fault looks different: **journald goes silent hours before the machine
+becomes unreachable**, while the survey keeps running.
+
+So the recurrence test is two-part. A new unsafe shutdown means *something* cut
+power. Whether it was a lockup is answered only by comparing the end of that
+boot's journal with the survey's last write:
+
+```bash
+journalctl -b -1 --no-pager | tail -3              # when did logging stop?
+journalctl -b -1 -u rfsurvey@uhf | grep stats | tail -1   # when did the survey?
+```
+
+Same second: power pull on a healthy machine. Hours apart: the fault.
+
+---
+
+## A power pull also corrupts the clock
+
+The Pi 5's RTC has no battery fitted. It keeps time across a **warm** reboot and
+loses it on a **power pull**, after which the clock is restored to a stale date
+and the survey starts before chrony corrects it. Event times are anchored at
+window open, so the whole run is misdated for its lifetime:
+
+```
+boot ended  how         chrony                   run   dated
+06:11       warm        no step                  16    correctly
+06:43       power pull  wrong by 4356004 s       17    2026-07-27
+08:15       power pull  wrong by 4386429 s       18    2026-07-27
+15:32       warm        no step                  19    correctly
+```
+
+Four for four. Runs 5, 17 and 18 are misdated this way, and all three are
+exactly recoverable: chrony logged the offset to the microsecond.
+
+**At Black Rock there is no NTP at all**, so chrony never corrects anything and
+every run after a power interruption is misdated permanently. Software cannot
+recover an absolute time that nothing on the machine knows. That needs the
+RTC battery, or a GPS time source.
+
+**Meanwhile, reboot with `sudo reboot`, never by pulling power** — a pull both
+misdates the next run and resets the journald experiment.
