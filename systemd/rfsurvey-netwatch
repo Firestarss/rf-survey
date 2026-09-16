@@ -1,116 +1,107 @@
 #!/bin/bash
-# Network watchdog: notice when the deck has lost its network and escalate
-# recovery, without ever touching the survey or rebooting.
+# Network watchdog for a deck that spends most of its life with NO network.
 #
-# Why: on 2026-09-16 the router steered the Pi between its two radios every
-# 15-40 minutes and the link dropped each time. Most drops healed in ~17 s to
-# ~1m45s. One did not: the Pi associated to the second radio with no DHCP lease
-# and sat unreachable until power was pulled — which cost a run boundary, an
-# unsafe shutdown and, with no RTC battery, a misdated run. The survey itself
-# never noticed; it needs no network. So the fix is recovery of the link, not of
-# the machine. See docs/deck-boot.md.
+# It intervenes in exactly one state: the supplicant reports it is associated
+# and authenticated (wpa_state=COMPLETED), yet wlan0 has no IPv4 address. Nothing
+# about the outside world explains that state — an access point accepted us and
+# DHCP never finished — so it is a local fault worth acting on.
 #
-# Run once a minute by rfsurvey-netwatch.timer. Silent while healthy; logs each
-# outage's start, every action, and its end, so the journal doubles as the
-# measurement of whether disable_btm reduced the drops.
+# Every other kind of "no network" is left alone, on purpose:
+#   no known network in range   the normal condition in the field. Silence.
+#   rejected or kicked by an AP the supplicant already retries by itself, and a
+#                               restart only resets the AP's own timers.
+#   up, but gateway not pinging logged for the record, never acted on.
+#
+# History, 2026-09-16. The first version acted on any failed gateway ping,
+# escalating after 3/6/12 minutes. Two things were wrong with that. In the field
+# the absence of a network is normal, so it would have restarted networking
+# forever. And at home it made no difference against the actual fault: an
+# Xfinity gateway band-steering the Pi, which after `disable_btm=1` switched from
+# polite steering requests to deauthenticating it (reason 7) eighteen times in
+# 2.5 hours, while its restarts merely reset the gateway's timers. The one
+# outage this design exists for is 06:39 that day: associated on the 5 GHz radio
+# at -69 dBm, no DHCP lease, for four minutes until power was pulled.
 #
 #   rfsurvey-netwatch            one check, acting if needed (what the timer runs)
 #   rfsurvey-netwatch --check    report state only, change nothing
 #
-# Durations use /proc/uptime, never the wall clock: on this machine the wall
-# clock is stepped by weeks after every cold boot.
+# Durations use /proc/uptime, never the wall clock, which is stepped by weeks
+# after every cold boot on this machine.
 set -u
 
 IFACE=wlan0
 STATE=/run/rfsurvey-netwatch
 WPA=(wpa_cli -p /run/wpa_supplicant -i "$IFACE")
 
-# Seconds of continuous outage before each escalation. The first is set above
-# the slowest self-healing drop observed (~1m45s) so a steering blip that would
-# have recovered by itself is never interrupted.
-L1_AFTER=180    # reassociate + renew DHCP: cures "associated, no lease"
-L2_AFTER=360    # restart the supplicant and reconfigure the link
-L3_AFTER=720    # restart systemd-networkd as well
-REPEAT_MIN=900  # after L3, repeat L3 no more often than this ...
-REPEAT_MAX=1800 # ... doubling up to this. At a site with no network at all
-                # this is all it will ever do: quietly retry twice an hour.
+L1_AFTER=120    # renew DHCP only — does not disassociate
+L2_AFTER=300    # reassociate — leave that radio and choose again
+L3_AFTER=600    # restart the supplicant and reconfigure the link
+REPEAT_MIN=900  # then L3 at most this often, doubling to REPEAT_MAX
+REPEAT_MAX=1800
 
-up_s() { awk '{print int($1)}' /proc/uptime; }
-now=$(up_s)
-mkdir -p "$STATE"
+up_s()     { awk '{print int($1)}' /proc/uptime; }
+wpa_state(){ "${WPA[@]}" status 2>/dev/null | awk -F= '$1=="wpa_state"{print $2}'; }
+has_ipv4() { ip -4 -o addr show dev "$IFACE" 2>/dev/null | grep -q ' inet '; }
+gw_ok()    { local gw; gw=$(ip -4 route show default dev "$IFACE" 2>/dev/null | awk '/^default/{print $3; exit}')
+             [ -n "$gw" ] && ping -c 2 -W 2 -I "$IFACE" "$gw" >/dev/null 2>&1; }
+
+now=$(up_s); mkdir -p "$STATE"
 get() { cat "$STATE/$1" 2>/dev/null || echo "${2:-}"; }
 put() { echo "$2" > "$STATE/$1"; }
 fmt() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
+clear_stuck() { rm -f "$STATE"/stuck_since "$STATE"/level "$STATE"/next_at "$STATE"/repeat "$STATE"/actions; }
 
-link_ok() {
-    local gw
-    gw=$(ip -4 route show default dev "$IFACE" 2>/dev/null | awk '/^default/ {print $3; exit}')
-    [ -n "$gw" ] || { REASON="no default route (no DHCP lease)"; return 1; }
-    ping -c 2 -W 2 -I "$IFACE" "$gw" >/dev/null 2>&1 \
-        || { REASON="gateway $gw not answering"; return 1; }
-    return 0
-}
-
-# Verify the steering fix at the point of effect every run: the running
-# supplicant, not the config file. Re-assert it if something reset it (a
-# `netplan apply` reload, a supplicant restart that missed the drop-in).
-btm=$("${WPA[@]}" get disable_btm 2>/dev/null)
-if [ "${1:-}" = "--check" ]; then
-    echo "disable_btm (running supplicant): ${btm:-unknown}"
-elif [ "$btm" = "0" ]; then
-    # Only an explicit 0. If the supplicant is unreachable wpa_cli prints an
-    # error instead, and "not 1" would then re-assert, and warn, every minute.
-    "${WPA[@]}" set disable_btm 1 >/dev/null 2>&1 \
-        && echo "WARN: disable_btm had reverted to $btm in the running supplicant; re-asserted" >&2
+ws=$(wpa_state); ipv4=no; has_ipv4 && ipv4=yes
+if [ "$ws" = "COMPLETED" ] && [ "$ipv4" = yes ] && gw_ok; then
+    usable=yes
+else
+    usable=no
 fi
 
-REASON=""
-if link_ok; then
-    down_since=$(get down_since)
-    if [ "${1:-}" = "--check" ]; then
-        echo "link: OK"; exit 0
-    fi
-    if [ -n "$down_since" ]; then
-        echo "network restored after $(fmt $(( now - down_since ))); actions taken: $(get actions none)"
-        rm -f "$STATE"/down_since "$STATE"/level "$STATE"/actions "$STATE"/next_at "$STATE"/repeat
-    fi
+if [ "${1:-}" = "--check" ]; then
+    echo "wpa_state=${ws:-unknown} ipv4=$ipv4 usable=$usable"
+    [ -n "$(get stuck_since)" ] && echo "STUCK (associated, no address) for $(fmt $(( now - $(get stuck_since) ))); level $(get level 0)"
     exit 0
 fi
 
-down_since=$(get down_since)
-if [ -z "$down_since" ]; then
-    down_since=$now; put down_since "$now"
-    [ "${1:-}" != "--check" ] && echo "network check failed: $REASON"
+# --- observation only: outage start/end, but only after the network has been up
+# this boot. A deck that never sees a network logs nothing at all.
+if [ "$usable" = yes ]; then
+    [ -n "$(get down_since)" ] && [ "$(get ever_up)" = yes ] && \
+        echo "network restored after $(fmt $(( now - $(get down_since) )))$( [ -n "$(get actions)" ] && echo "; watchdog actions: $(get actions)")"
+    put ever_up yes; rm -f "$STATE/down_since"; clear_stuck
+    exit 0
 fi
-down=$(( now - down_since ))
+if [ -z "$(get down_since)" ]; then
+    put down_since "$now"
+    [ "$(get ever_up)" = yes ] && echo "network lost (wpa_state=${ws:-unknown}, ipv4=$ipv4)"
+fi
 
-if [ "${1:-}" = "--check" ]; then
-    echo "link: DOWN for $(fmt $down) ($REASON); escalation level so far: $(get level 0)"
+# --- the one state we act on
+if [ "$ws" != "COMPLETED" ] || [ "$ipv4" = yes ]; then
+    clear_stuck      # not our fault to fix: out of range, rejected, or just unreachable
     exit 0
 fi
 
+[ -z "$(get stuck_since)" ] && put stuck_since "$now"
+stuck=$(( now - $(get stuck_since) ))
 level=$(get level 0)
-act() {  # $1 = level label, rest = commands description
-    put level "$2"
-    put actions "$(get actions '' | sed 's/^none$//')${3} "
-    echo "WARN: down $(fmt $down) ($REASON) -> $1" >&2
-}
+bssid=$("${WPA[@]}" status 2>/dev/null | awk -F= '$1=="bssid"{print $2}')
+act() { put level "$2"; put actions "$(get actions)$3 "
+        echo "WARN: associated to ${bssid:-?} with no IPv4 address for $(fmt $stuck) -> $1" >&2; }
 
-if [ "$level" -lt 1 ] && [ "$down" -ge "$L1_AFTER" ]; then
-    act "L1: reassociate and renew DHCP" 1 L1
-    "${WPA[@]}" reassociate >/dev/null 2>&1
+if [ "$level" -lt 1 ] && [ "$stuck" -ge "$L1_AFTER" ]; then
+    act "L1: renew DHCP" 1 L1
     networkctl renew "$IFACE" >/dev/null 2>&1
-elif [ "$level" -lt 2 ] && [ "$down" -ge "$L2_AFTER" ]; then
-    act "L2: restart netplan-wpa-$IFACE and reconfigure $IFACE" 2 L2
-    systemctl restart "netplan-wpa-$IFACE.service"
-    sleep 5
-    networkctl reconfigure "$IFACE" >/dev/null 2>&1
-elif [ "$down" -ge "$L3_AFTER" ] && [ "$now" -ge "$(get next_at 0)" ]; then
+elif [ "$level" -lt 2 ] && [ "$stuck" -ge "$L2_AFTER" ]; then
+    act "L2: reassociate" 2 L2
+    "${WPA[@]}" reassociate >/dev/null 2>&1
+elif [ "$stuck" -ge "$L3_AFTER" ] && [ "$now" -ge "$(get next_at 0)" ]; then
     repeat=$(get repeat "$REPEAT_MIN")
-    act "L3: restart systemd-networkd and the supplicant (next retry in $(fmt $repeat))" 3 L3
+    act "L3: restart netplan-wpa-$IFACE and reconfigure (next retry in $(fmt $repeat))" 3 L3
     put next_at $(( now + repeat ))
     put repeat $(( repeat * 2 > REPEAT_MAX ? REPEAT_MAX : repeat * 2 ))
-    systemctl restart systemd-networkd
-    systemctl restart "netplan-wpa-$IFACE.service"
+    systemctl restart "netplan-wpa-$IFACE.service"; sleep 5
+    networkctl reconfigure "$IFACE" >/dev/null 2>&1
 fi
 exit 0

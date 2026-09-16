@@ -268,51 +268,93 @@ stuck outages — 06:39 on 2026-09-16, and a deliberate supplicant restart at 17
 — were this exact sequence: rejected on 2.4 GHz, associated on 5 GHz, no IPv4
 lease. Every recovery that day ended on 2.4 GHz.
 
-### Applied 2026-09-16
+### `disable_btm=1` made it worse, and was reverted
 
-- **`disable_btm=1`**, live in the running supplicant and persisted by the
-  drop-in `netplan-wpa-wlan0.service.d/10-rfsurvey-nobtm.conf`
-  (`systemd/rfsurvey-wifi-nobtm`). It stops the Pi advertising BSS Transition
-  support, so a compliant gateway stops sending 802.11v requests. **It cannot
-  stop association-time rejection**, which is a separate steering mechanism.
-- **`rfsurvey-netwatch.timer`**, once a minute: silent while healthy; logs each
-  outage's start, action and end; escalates after 3 / 6 / 12 minutes down
-  (reassociate + DHCP renew → restart supplicant → restart networkd), then retries
-  every 15 then 30 minutes. Never touches the survey, never reboots. It also
-  re-asserts `disable_btm=1` in the running supplicant if it ever reads `0`, and
-  logs that it had to — so a WARN from it after a supplicant restart would mean
-  the drop-in failed.
+Applied 2026-09-16 ~18:00 and removed at 20:36, on evidence. It did exactly what
+it is designed to do — stop advertising BSS Transition support — and the gateway
+answered by kicking the Pi off instead of asking it to move:
 
-**Verifying the drop-in end to end failed safely, for the wrong reason.** A
-detached restart-with-rollback gave the link 90 s to return. The log showed the
-drop-in working (`rfsurvey-wifi-nobtm: disable_btm=1 set`), then the steering
-dance above, and the rollback fired before DHCP came back. It was not
-`disable_btm`: the watchdog re-asserted it at 18:01:00 on the rolled-back
-supplicant, and the association that followed — 2.4 GHz, lease acquired — was
-made with it in effect. The 90 s window was shorter than this gateway's
-steering enforcement (~2 min). The drop-in was reinstalled.
+| | 2.4 h before | 2.6 h after |
+|---|---|---|
+| 802.11v steering requests | 7 | **0** |
+| gateway deauthenticated the Pi (reason 7) | 0 | **18** |
+| association refused on 5 GHz | 0 | 9 |
 
-### Options, not yet chosen
+A steering request cost ~17 s of outage. A kick cost 2–10 minutes, and the deck
+was unreachable for most of that evening. **Some band-steering gateways fall back
+to hard steering for clients that refuse soft steering; this one does.** Do not
+reapply it on this network.
+
+### 2.4 GHz only — applied 2026-09-16 20:41
+
+```yaml
+      access-points:
+        "MobiusStripClubSandwich":
+          band: 2.4GHz          # <- added
+          auth: ...
+```
+
+Netplan turns this into `freq_list=` (the 2.4 GHz channels) in the network block,
+so the Pi can never associate to the 5 GHz radio where DHCP fails. It is scoped to
+this one SSID and constrains no other network the deck joins.
+
+**It must go inside the existing access-point entry.** Putting it in a separate
+overlay file (`90-*.yaml`) makes netplan *replace* the access point rather than
+merge into it: tested offline with `netplan generate --root-dir`, the result lost
+the password and came out `key_mgmt=NONE`. Applied live, that would have taken
+the deck off the network entirely.
+
+Applied by a detached job with an eight-minute automatic rollback; back on
+2.4 GHz with an address in 10 s. Backup of the original file:
+`/var/backups/netplan-50-cloud-init.yaml.pre-2g4`. To undo by hand:
+
+```bash
+sudo install -m 600 /var/backups/netplan-50-cloud-init.yaml.pre-2g4 /etc/netplan/50-cloud-init.yaml
+sudo netplan generate && sudo systemctl restart netplan-wpa-wlan0.service
+```
+
+**Open question, to be answered by the watchdog's log:** `freq_list` restricts
+which radio the Pi joins, not necessarily which bands it scans. If it still
+probes on 5 GHz the gateway may keep classifying it as dual-band and keep sending
+steering requests. Whether drops continue will show in
+`journalctl -u rfsurvey-netwatch` as `network lost` / `network restored` pairs.
+
+### The watchdog, redesigned for a deck with no network
+
+`rfsurvey-netwatch.timer`, once a minute. The first version acted on any failed
+gateway ping — wrong for a field deck, where no network is the normal state, and
+no help at home, where its restarts only reset the gateway's steering timers.
+
+It now acts in exactly one state: **associated and authenticated
+(`wpa_state=COMPLETED`) but no IPv4 address.** An access point accepted the Pi
+and DHCP never finished; nothing outside explains that. Escalation: renew DHCP at
+2 min, reassociate at 5, restart the supplicant at 10, then every 15 and 30.
+
+Everything else — no network in range, rejected or kicked, gateway not answering
+ping — gets no action. Outages are logged as `network lost` / `restored` only
+after the network has been up once this boot, so **a deck that never sees a
+network logs nothing at all.** Simulated before install:
+
+| scenario | log lines | actions |
+|---|---|---|
+| field, no network for 3 h | 0 | 0 |
+| gateway kicks it off for 6 min | 2 | 0 |
+| associated, no address, 30 min | 6 | renew, reassociate, restart, restart |
+| up, gateway not answering ping, 20 min | 2 | 0 |
+| 60 min no network, then a phone hotspot | 2 | 0 |
+
+### Other options, if drops continue
 
 - **Ethernet.** `eth0` is already configured for DHCP (`optional: true`) and
   unplugged. Removes the fault at home with no configuration at all.
 - **Turn off band steering / 802.11v for this device on the router.** Fixes it at
   the source; does not travel with the deck.
-- **Restrict this SSID to 2.4 GHz** in netplan (`band: 2.4GHz`). Now the
-  strongest candidate: it makes the stuck state impossible, because the Pi can
-  never associate to the 5 GHz radio where DHCP fails. It is scoped to this one
-  SSID, so it does not constrain any other network the deck joins. Cost: the
-  gateway may keep rejecting 2.4 GHz for a couple of minutes after each steering
-  attempt, and the Pi then has nowhere to fall back to. A `bssid:` pin does the
-  same but breaks if the gateway is ever replaced.
-- **`disable_btm=1` in wpa_supplicant.** The Pi ignores steering. Netplan does
-  not expose it, so it needs an override outside netplan.
-- **Connectivity watchdog:** a timer that checks the gateway and restarts
-  networking after several minutes down. Recovers the stuck-without-DHCP case
-  whatever caused it, including at a festival.
+- ~~Restrict this SSID to 2.4 GHz~~ — applied, above.
+- ~~`disable_btm=1`~~ — applied and reverted, above.
 
-**Until one is in place: when the deck is unreachable, wait five minutes before
-pulling power.** Most drops heal inside two.
+**If the deck is unreachable, wait before pulling power.** The survey keeps
+running regardless, and a pull costs a run boundary, an unsafe shutdown and —
+without an RTC battery — a misdated run.
 
 ---
 

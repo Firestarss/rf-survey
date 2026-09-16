@@ -1,5 +1,6 @@
 [Unit]
-# One network check, escalating recovery if the link has been down long enough.
+# One network check. Acts only when associated but without an IPv4 address;
+# silent when no network is in range, which is the normal state in the field.
 # Activated once a minute by rfsurvey-netwatch.timer; see systemd/rfsurvey-netwatch.
 Description=RF survey deck — network watchdog check
 Documentation=file:/home/firestarss/rfsurvey/docs/deck-boot.md
