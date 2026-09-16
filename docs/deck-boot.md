@@ -251,14 +251,60 @@ run.
 | survey | keeps running | keeps running |
 | in the journal | nothing — it cannot write | `WNM` / `Lost carrier` |
 
+### What the steering actually is: 2.4 GHz vs a weak 5 GHz
+
+Identified the same evening from `wpa_cli scan_results`. The two BSSIDs are the
+two radios of one Xfinity gateway:
+
+| BSSID | band | signal at the deck |
+|---|---|---|
+| `42:75:c3:fe:b7:f9` | 2.4 GHz, ch 1 | **−48 dBm** |
+| `42:75:c3:05:b7:fa` | 5 GHz, ch 157 | **−69 dBm** |
+
+This is band steering. The gateway pushes the Pi toward 5 GHz, where the signal
+at the deck is 21 dB weaker and **DHCP does not complete**, and while enforcing
+the move it rejects association on 2.4 GHz (`ASSOC-REJECT status_code=16`). Both
+stuck outages — 06:39 on 2026-09-16, and a deliberate supplicant restart at 17:59
+— were this exact sequence: rejected on 2.4 GHz, associated on 5 GHz, no IPv4
+lease. Every recovery that day ended on 2.4 GHz.
+
+### Applied 2026-09-16
+
+- **`disable_btm=1`**, live in the running supplicant and persisted by the
+  drop-in `netplan-wpa-wlan0.service.d/10-rfsurvey-nobtm.conf`
+  (`systemd/rfsurvey-wifi-nobtm`). It stops the Pi advertising BSS Transition
+  support, so a compliant gateway stops sending 802.11v requests. **It cannot
+  stop association-time rejection**, which is a separate steering mechanism.
+- **`rfsurvey-netwatch.timer`**, once a minute: silent while healthy; logs each
+  outage's start, action and end; escalates after 3 / 6 / 12 minutes down
+  (reassociate + DHCP renew → restart supplicant → restart networkd), then retries
+  every 15 then 30 minutes. Never touches the survey, never reboots. It also
+  re-asserts `disable_btm=1` in the running supplicant if it ever reads `0`, and
+  logs that it had to — so a WARN from it after a supplicant restart would mean
+  the drop-in failed.
+
+**Verifying the drop-in end to end failed safely, for the wrong reason.** A
+detached restart-with-rollback gave the link 90 s to return. The log showed the
+drop-in working (`rfsurvey-wifi-nobtm: disable_btm=1 set`), then the steering
+dance above, and the rollback fired before DHCP came back. It was not
+`disable_btm`: the watchdog re-asserted it at 18:01:00 on the rolled-back
+supplicant, and the association that followed — 2.4 GHz, lease acquired — was
+made with it in effect. The 90 s window was shorter than this gateway's
+steering enforcement (~2 min). The drop-in was reinstalled.
+
 ### Options, not yet chosen
 
 - **Ethernet.** `eth0` is already configured for DHCP (`optional: true`) and
   unplugged. Removes the fault at home with no configuration at all.
 - **Turn off band steering / 802.11v for this device on the router.** Fixes it at
   the source; does not travel with the deck.
-- **Pin the BSSID or band** in netplan (`bssid:` / `band:`). Stops the move;
-  the AP may still send requests or deauthenticate.
+- **Restrict this SSID to 2.4 GHz** in netplan (`band: 2.4GHz`). Now the
+  strongest candidate: it makes the stuck state impossible, because the Pi can
+  never associate to the 5 GHz radio where DHCP fails. It is scoped to this one
+  SSID, so it does not constrain any other network the deck joins. Cost: the
+  gateway may keep rejecting 2.4 GHz for a couple of minutes after each steering
+  attempt, and the Pi then has nowhere to fall back to. A `bssid:` pin does the
+  same but breaks if the gateway is ever replaced.
 - **`disable_btm=1` in wpa_supplicant.** The Pi ignores steering. Netplan does
   not expose it, so it needs an override outside netplan.
 - **Connectivity watchdog:** a timer that checks the gateway and restarts

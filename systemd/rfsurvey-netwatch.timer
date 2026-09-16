@@ -1,0 +1,11 @@
+[Unit]
+Description=RF survey deck — network watchdog, once a minute
+
+[Timer]
+# Give the network two minutes to come up at boot before judging it.
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

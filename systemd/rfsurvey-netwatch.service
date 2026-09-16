@@ -1,0 +1,14 @@
+[Unit]
+# One network check, escalating recovery if the link has been down long enough.
+# Activated once a minute by rfsurvey-netwatch.timer; see systemd/rfsurvey-netwatch.
+Description=RF survey deck — network watchdog check
+Documentation=file:/home/firestarss/rfsurvey/docs/deck-boot.md
+After=network.target
+
+[Service]
+Type=oneshot
+# Root: it restarts systemd-networkd and the supplicant. It never touches the
+# survey and never reboots — a reboot costs a run boundary, and without an RTC
+# battery a power cycle misdates the next run.
+ExecStart=/home/firestarss/rfsurvey/systemd/rfsurvey-netwatch
+SyslogIdentifier=rfsurvey-netwatch

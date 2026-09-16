@@ -1,0 +1,116 @@
+#!/bin/bash
+# Network watchdog: notice when the deck has lost its network and escalate
+# recovery, without ever touching the survey or rebooting.
+#
+# Why: on 2026-09-16 the router steered the Pi between its two radios every
+# 15-40 minutes and the link dropped each time. Most drops healed in ~17 s to
+# ~1m45s. One did not: the Pi associated to the second radio with no DHCP lease
+# and sat unreachable until power was pulled — which cost a run boundary, an
+# unsafe shutdown and, with no RTC battery, a misdated run. The survey itself
+# never noticed; it needs no network. So the fix is recovery of the link, not of
+# the machine. See docs/deck-boot.md.
+#
+# Run once a minute by rfsurvey-netwatch.timer. Silent while healthy; logs each
+# outage's start, every action, and its end, so the journal doubles as the
+# measurement of whether disable_btm reduced the drops.
+#
+#   rfsurvey-netwatch            one check, acting if needed (what the timer runs)
+#   rfsurvey-netwatch --check    report state only, change nothing
+#
+# Durations use /proc/uptime, never the wall clock: on this machine the wall
+# clock is stepped by weeks after every cold boot.
+set -u
+
+IFACE=wlan0
+STATE=/run/rfsurvey-netwatch
+WPA=(wpa_cli -p /run/wpa_supplicant -i "$IFACE")
+
+# Seconds of continuous outage before each escalation. The first is set above
+# the slowest self-healing drop observed (~1m45s) so a steering blip that would
+# have recovered by itself is never interrupted.
+L1_AFTER=180    # reassociate + renew DHCP: cures "associated, no lease"
+L2_AFTER=360    # restart the supplicant and reconfigure the link
+L3_AFTER=720    # restart systemd-networkd as well
+REPEAT_MIN=900  # after L3, repeat L3 no more often than this ...
+REPEAT_MAX=1800 # ... doubling up to this. At a site with no network at all
+                # this is all it will ever do: quietly retry twice an hour.
+
+up_s() { awk '{print int($1)}' /proc/uptime; }
+now=$(up_s)
+mkdir -p "$STATE"
+get() { cat "$STATE/$1" 2>/dev/null || echo "${2:-}"; }
+put() { echo "$2" > "$STATE/$1"; }
+fmt() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
+
+link_ok() {
+    local gw
+    gw=$(ip -4 route show default dev "$IFACE" 2>/dev/null | awk '/^default/ {print $3; exit}')
+    [ -n "$gw" ] || { REASON="no default route (no DHCP lease)"; return 1; }
+    ping -c 2 -W 2 -I "$IFACE" "$gw" >/dev/null 2>&1 \
+        || { REASON="gateway $gw not answering"; return 1; }
+    return 0
+}
+
+# Verify the steering fix at the point of effect every run: the running
+# supplicant, not the config file. Re-assert it if something reset it (a
+# `netplan apply` reload, a supplicant restart that missed the drop-in).
+btm=$("${WPA[@]}" get disable_btm 2>/dev/null)
+if [ "${1:-}" = "--check" ]; then
+    echo "disable_btm (running supplicant): ${btm:-unknown}"
+elif [ "$btm" = "0" ]; then
+    # Only an explicit 0. If the supplicant is unreachable wpa_cli prints an
+    # error instead, and "not 1" would then re-assert, and warn, every minute.
+    "${WPA[@]}" set disable_btm 1 >/dev/null 2>&1 \
+        && echo "WARN: disable_btm had reverted to $btm in the running supplicant; re-asserted" >&2
+fi
+
+REASON=""
+if link_ok; then
+    down_since=$(get down_since)
+    if [ "${1:-}" = "--check" ]; then
+        echo "link: OK"; exit 0
+    fi
+    if [ -n "$down_since" ]; then
+        echo "network restored after $(fmt $(( now - down_since ))); actions taken: $(get actions none)"
+        rm -f "$STATE"/down_since "$STATE"/level "$STATE"/actions "$STATE"/next_at "$STATE"/repeat
+    fi
+    exit 0
+fi
+
+down_since=$(get down_since)
+if [ -z "$down_since" ]; then
+    down_since=$now; put down_since "$now"
+    [ "${1:-}" != "--check" ] && echo "network check failed: $REASON"
+fi
+down=$(( now - down_since ))
+
+if [ "${1:-}" = "--check" ]; then
+    echo "link: DOWN for $(fmt $down) ($REASON); escalation level so far: $(get level 0)"
+    exit 0
+fi
+
+level=$(get level 0)
+act() {  # $1 = level label, rest = commands description
+    put level "$2"
+    put actions "$(get actions '' | sed 's/^none$//')${3} "
+    echo "WARN: down $(fmt $down) ($REASON) -> $1" >&2
+}
+
+if [ "$level" -lt 1 ] && [ "$down" -ge "$L1_AFTER" ]; then
+    act "L1: reassociate and renew DHCP" 1 L1
+    "${WPA[@]}" reassociate >/dev/null 2>&1
+    networkctl renew "$IFACE" >/dev/null 2>&1
+elif [ "$level" -lt 2 ] && [ "$down" -ge "$L2_AFTER" ]; then
+    act "L2: restart netplan-wpa-$IFACE and reconfigure $IFACE" 2 L2
+    systemctl restart "netplan-wpa-$IFACE.service"
+    sleep 5
+    networkctl reconfigure "$IFACE" >/dev/null 2>&1
+elif [ "$down" -ge "$L3_AFTER" ] && [ "$now" -ge "$(get next_at 0)" ]; then
+    repeat=$(get repeat "$REPEAT_MIN")
+    act "L3: restart systemd-networkd and the supplicant (next retry in $(fmt $repeat))" 3 L3
+    put next_at $(( now + repeat ))
+    put repeat $(( repeat * 2 > REPEAT_MAX ? REPEAT_MAX : repeat * 2 ))
+    systemctl restart systemd-networkd
+    systemctl restart "netplan-wpa-$IFACE.service"
+fi
+exit 0
