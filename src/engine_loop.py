@@ -46,6 +46,23 @@ ENGINE = pathlib.Path(__file__).resolve().parent.parent / "engine" / "target" / 
 # every event detected and timed.
 ANALYSIS_DEPTH = 2
 
+# Analysis processes sharing that queue. ONE, and measured to be one, on
+# 2026-09-16 with both receivers at 10 MSPS under ~22,000 events/hour of Boston
+# traffic on uhf:
+#
+#   workers  priority  overflows (uhf / vhf)  engine ms/frame  analyses skipped
+#      1      normal    0 / 0 in 6.5 min          1.8               8.1%
+#      2      normal    1 / 0 in 4.5 min          2.8               5.1%
+#      2      nice 15   1 / 1 in 4.5 min          2.6               5.1%
+#
+# A second worker analyses more, and costs the engines headroom, and lowering its
+# priority did not buy that back: what it competes for is the memory bus as much
+# as CPU time, and scheduling priority does not arbitrate that. A skipped
+# analysis loses one event's tone; an overflow corrupts every level and duration
+# in the window. The trade goes to the samples.
+ANALYSIS_WORKERS = 1
+ANALYSIS_NICE = 15
+
 RING_MAGIC = int.from_bytes(b"RFSVRING", "little")
 
 # Headroom in the shared ring beyond one analysis window. The Python engine's
@@ -98,6 +115,12 @@ def analysis_main(jobs, results, shm_path):
     # systemd signals every process in the unit. The orchestrator owns shutdown
     # and ends this with a None job once queued work is done.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # Analysis yields the CPU to the engines. Not sufficient on its own to make a
+    # second worker safe (see ANALYSIS_WORKERS), but it can only help the reader.
+    try:
+        os.nice(ANALYSIS_NICE)
+    except OSError:
+        pass
     mm = None
     while True:
         job = jobs.get()
@@ -149,10 +172,12 @@ class EngineCaptureLoop:
         ctx = mp.get_context("fork")
         self.jobs = ctx.Queue(maxsize=ANALYSIS_DEPTH)
         self.results = ctx.Queue()
-        self.analysis = ctx.Process(target=analysis_main, name="analysis",
-                                    args=(self.jobs, self.results, self.shm_path),
-                                    daemon=True)
-        self.analysis.start()
+        self.analysis = [ctx.Process(target=analysis_main, name=f"analysis-{i}",
+                                     args=(self.jobs, self.results, self.shm_path),
+                                     daemon=True)
+                         for i in range(ANALYSIS_WORKERS)]
+        for proc in self.analysis:
+            proc.start()
 
         rate_req = float(settings["rate"])
         cfg = {
@@ -515,14 +540,16 @@ class EngineCaptureLoop:
 
         # Let queued analyses finish and apply them: they belong to events
         # already in the database.
-        self.jobs.put(None)
+        for _ in self.analysis:
+            self.jobs.put(None)
         deadline = time.time() + 30.0
-        while self.analysis.is_alive() and time.time() < deadline:
+        while any(p.is_alive() for p in self.analysis) and time.time() < deadline:
             self._collect()
             time.sleep(0.1)
         self._collect()
-        if self.analysis.is_alive():
-            self.analysis.terminate()
+        for proc in self.analysis:
+            if proc.is_alive():
+                proc.terminate()
 
         if self.window_id is not None and self.conn is not None:
             db.close_window(self.conn, self.window_id)
@@ -579,7 +606,7 @@ def run(args, settings, iq_file=None, file_wall0=None):
     print(f"{sp.ChannelGrid(first_center, rate).n} channels on a {sp.CHANNEL_HZ/1000:.2f} kHz grid, "
           f"{loop.frame_seconds*1000:.1f} ms frames ({rate/loop.fs:.0f}/sec)")
     print(f"ring buffer {int(loop.ready['ring_capacity'])*8/1e6:.0f} MB in {loop.shm_path}, "
-          f"shared with the analysis process\n")
+          f"shared with {ANALYSIS_WORKERS} analysis processes\n")
     if loop.store is not None:
         print(f"retaining {'audio + channel IQ' if args.capture_iq else 'audio'} "
               f"under {loop.store.root}, budget {args.capture_mb:.0f} MB")
