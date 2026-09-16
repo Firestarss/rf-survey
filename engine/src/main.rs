@@ -64,6 +64,7 @@ struct Config {
     compression_seconds: f64,
     max_gain: f64,
     file_wall0: f64,
+    file_realtime: bool,
 }
 
 fn f(v: &Value, k: &str, default: Option<f64>) -> f64 {
@@ -107,6 +108,7 @@ impl Config {
             compression_seconds: f(&v, "compression_seconds", Some(0.5)),
             max_gain: f(&v, "max_gain", Some(45.0)),
             file_wall0: f(&v, "file_wall0", Some(0.0)),
+            file_realtime: v.get("file_realtime").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 }
@@ -135,6 +137,7 @@ fn wall_now() -> f64 {
 enum ToDsp {
     Frame(Vec<Complex32>, usize),
     Overflow,
+    Tuned { center_hz: f64 },
     Window { center_hz: f64, wall0: f64, linearity: Option<(String, Vec<f64>)> },
     Close,
     Stall,
@@ -153,7 +156,11 @@ enum Cmd {
 
 enum Source {
     Device(soapy::Device),
-    File(std::fs::File),
+    /// A file of CF32 samples. `pace` delivers them at the sample rate instead
+    /// of as fast as the disk allows, for tests of the whole loop: analysis
+    /// reads the ring after the decision, so a source running 5x real time
+    /// would overwrite the samples before analysis got to them.
+    File(std::fs::File, Option<(Instant, f64, u64)>),
 }
 
 enum ReadResult {
@@ -176,7 +183,7 @@ impl Source {
                     ReadResult::Nothing
                 }
             }
-            Source::File(file) => {
+            Source::File(file, pace) => {
                 // SAFETY: Complex32 is two f32s, 8 bytes, no padding.
                 let bytes = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, buf.len() * 8) };
                 let mut got = 0;
@@ -189,10 +196,17 @@ impl Source {
                 }
                 let n = got / 8;
                 if n == 0 {
-                    ReadResult::Eof
-                } else {
-                    ReadResult::Samples(n)
+                    return ReadResult::Eof;
                 }
+                if let Some((t0, rate, delivered)) = pace {
+                    *delivered += n as u64;
+                    let due = *delivered as f64 / *rate;
+                    let now = t0.elapsed().as_secs_f64();
+                    if due > now {
+                        std::thread::sleep(std::time::Duration::from_secs_f64(due - now));
+                    }
+                }
+                ReadResult::Samples(n)
             }
         }
     }
@@ -229,7 +243,7 @@ impl Reader {
     fn linearity(&mut self, center_hz: f64) -> (String, Vec<f64>) {
         let dev = match &mut self.src {
             Source::Device(d) => d as *mut soapy::Device,
-            Source::File(_) => return ("unchecked".into(), vec![]),
+            Source::File(..) => return ("unchecked".into(), vec![]),
         };
         let gain = self.cfg.gain;
         let step = self.cfg.gain_step;
@@ -286,8 +300,11 @@ impl Reader {
                 let got = d.set_frequency(tune_request_hz(center_hz, self.cfg.ppm)).unwrap_or_else(|e| fatal(&e));
                 (true_center_hz(got, self.cfg.ppm), 0.0)
             }
-            Source::File(_) => (center_hz, self.cfg.file_wall0),
+            Source::File(..) => (center_hz, self.cfg.file_wall0),
         };
+        // Announced before the probe: Python opens the database window at tune
+        // time, and the linearity verdict is written to that window's row.
+        self.send(ToDsp::Tuned { center_hz: center });
         let lin = if linearity { Some(self.linearity(center)) } else { None };
         // Anchor the sample clock AFTER the probe. The Python engine anchored
         // before it, and the probe's ~1.5-3 s of samples never reached the
@@ -580,6 +597,7 @@ impl Dsp {
                     let _ = self.pool.send(buf);
                 }
                 ToDsp::Overflow => self.overflows += 1,
+                ToDsp::Tuned { center_hz } => self.emit(json!({"t": "tuned", "center_hz": center_hz})),
                 ToDsp::Window { center_hz, wall0, linearity } => self.open_window(center_hz, wall0, linearity),
                 ToDsp::Close => self.close_window(),
                 ToDsp::Stall => {
@@ -606,6 +624,13 @@ impl Dsp {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // SIGINT is for the orchestrator. systemd delivers it to every process in
+    // the unit, and dying on it here would skip the close of the last window;
+    // Python catches it and sends "stop", which closes things in order.
+    // SAFETY: installing SIG_IGN has no preconditions.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+    }
     let arg = std::env::args().nth(1).unwrap_or_else(|| fatal("usage: rfsurvey-engine '<json config>'"));
     let cfg = Config::parse(&arg);
 
@@ -640,7 +665,8 @@ fn main() {
     let (src, rate, mtu, serial) = match &cfg.file {
         Some(path) => {
             let file = std::fs::File::open(path).unwrap_or_else(|e| fatal(&format!("{}: {e}", path.display())));
-            (Source::File(file), cfg.rate, cfg.file_mtu, None)
+            let pace = if cfg.file_realtime { Some((Instant::now(), cfg.rate, 0u64)) } else { None };
+            (Source::File(file, pace), cfg.rate, cfg.file_mtu, None)
         }
         None => {
             let mut d = soapy::Device::open(&cfg.device_args).unwrap_or_else(|e| fatal(&e));

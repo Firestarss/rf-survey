@@ -2451,6 +2451,16 @@ class CaptureLoop:
 
 def run(args):
     settings = resolve_settings(args)
+    # getattr, not args.engine: run() is also called with a Namespace built by
+    # hand (tests/test_endtoend.py), which predates the option and must keep
+    # meaning the Python engine.
+    if getattr(args, "engine", "python") == "rust":
+        if args.simulate:
+            raise SystemExit("--simulate drives the Python engine only; for the rust "
+                             "engine use tests/test_engine_loop.py")
+        import engine_loop
+        return engine_loop.run(args, settings, iq_file=getattr(args, "engine_iq_file", None),
+                               file_wall0=getattr(args, "engine_wall0", None))
     radio = Radio(args, settings)
     rate, center = radio.configure(settings)
     serial = radio.serial(settings["serial_want"])
@@ -2561,6 +2571,15 @@ def main():
                    help="retention budget in MB; capture stops at the cap and "
                         "logging continues (default 2000)")
     p.add_argument("--stats", action="store_true")
+    p.add_argument("--engine", choices=("python", "rust"), default="python",
+                   help="python: the in-process loop. rust: engine/ reads and "
+                        "detects in its own process and analysis runs in a third "
+                        "(see src/engine_loop.py). Build with cargo build --release")
+    # Test hook: drive the rust engine from a file of CF32 samples instead of a
+    # radio, so the whole path from detection to database rows can be compared
+    # against the Python engine on identical input.
+    p.add_argument("--engine-iq-file", metavar="PATH", help=argparse.SUPPRESS)
+    p.add_argument("--engine-wall0", type=float, help=argparse.SUPPRESS)
     p.add_argument("--spectrum", metavar="PATH",
                    help="capture a band and write a spectrum/waterfall PNG, "
                         "then print the strongest channels. For headless use.")
