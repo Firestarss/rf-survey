@@ -387,3 +387,20 @@ run, correctly dated or not, is stamped about **1.5–2 s early**. The control r
 show journal-minus-`t_end` of +1.83 to +2.34 s, of which ~0.3 s is the detector's
 hang time. The likely cause is `window_t0` being taken at window open, before the
 linearity check reads samples that the event clock never counts. Unconfirmed.
+
+---
+
+## Field WiFi networks — added 2026-09-16
+
+`/etc/netplan/50-cloud-init.yaml` now holds three access points: the home network
+(2.4 GHz only), **`jnwwifi`** (the WildFire lodge) and **`What iPhone?`** (the
+operator's hotspot). Added inside the existing `access-points:` map for the same
+reason as the band setting — an overlay file replaces the map.
+
+Verified before applying: netplan generated three WPA-PSK networks, the home one
+kept its `freq_list`, and both new passphrases matched byte-for-byte what was
+supplied, checked programmatically rather than by eye. The hotspot password
+contains an apostrophe; iOS Smart Punctuation can store a curly `’` in its place,
+which derives a different key — if the Pi will not join the hotspot, that is the
+first suspect. Applied with automatic rollback; home network back in 5 s with all
+three loaded. Backup: `/var/backups/netplan-50-cloud-init.yaml.pre-fieldwifi`.

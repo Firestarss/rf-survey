@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import fcntl
 import pathlib
 import socket
 import sqlite3
@@ -61,22 +62,42 @@ def init_schema(path: str) -> None:
     happened, so the prior version is read first and restored afterwards.
     """
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = connect(path)
-    try:
-        prior = _read_version(db)
-        db.executescript(SCHEMA_PATH.read_text())
-        if prior is not None:
-            db.execute(
-                "INSERT OR REPLACE INTO schema_meta (key,value) VALUES ('version',?)",
-                (str(prior),))
-        migrate.apply(db, SCHEMA_VERSION)
 
-        found = _read_version(db)
-        if found != SCHEMA_VERSION:
-            raise RuntimeError(
-                f"{path} is schema v{found}, this code expects v{SCHEMA_VERSION}")
-    finally:
-        db.close()
+    # Serialise the whole of this across processes. Every boot starts both
+    # receivers at once against the shared database, and the steps below —
+    # read the version, run the baseline (which stamps v2), write the version
+    # back, migrate — are separate transactions. On 2026-09-16, the first time
+    # two receivers ran together, one process wrote back a version it had read
+    # while the other was mid-migration: a database stamped v9 holding all of
+    # migration 10, and a receiver crash-looping on "duplicate column" until
+    # systemd gave up. tests/test_concurrent_init.py reproduces it; it failed
+    # against an already-migrated database too, so this was a risk on every
+    # boot, not only the first.
+    #
+    # An flock on a sidecar file rather than a SQLite lock, because the
+    # baseline's executescript() commits on its own and apply() runs one
+    # transaction per migration — there is no single transaction that could
+    # span them. Both receivers are processes on one host, which is exactly
+    # what flock serialises. Released when the file closes, including if the
+    # process dies holding it.
+    with open(f"{path}.schema-lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        db = connect(path)
+        try:
+            prior = _read_version(db)
+            db.executescript(SCHEMA_PATH.read_text())
+            if prior is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO schema_meta (key,value) VALUES ('version',?)",
+                    (str(prior),))
+            migrate.apply(db, SCHEMA_VERSION)
+
+            found = _read_version(db)
+            if found != SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"{path} is schema v{found}, this code expects v{SCHEMA_VERSION}")
+        finally:
+            db.close()
 
 
 def _git_commit() -> str | None:
