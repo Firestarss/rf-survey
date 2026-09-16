@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RF Survey Deck</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+    --uhf: #2a78d6; --vhf: #eb6834;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --good-text: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+      --uhf: #3987e5; --vhf: #d95926; --good-text: #0ca30c;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --uhf: #3987e5; --vhf: #d95926; --good-text: #0ca30c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
+  .sub { color: var(--ink-2); font-size: 13px; }
+  .muted { color: var(--muted); }
+  .banner { border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; background: var(--surface);
+            box-shadow: inset 0 0 0 1px var(--ring); display: none; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background: var(--surface); border-radius: 12px; padding: 14px 16px;
+          box-shadow: inset 0 0 0 1px var(--ring); margin-bottom: 12px; }
+  .rx-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+  .rx-name { font-weight: 600; font-size: 17px; }
+  .state { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .kv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
+  .k { color: var(--ink-2); font-size: 12px; }
+  .v { font-size: 17px; font-weight: 600; }
+  .v small { font-size: 12px; font-weight: 400; color: var(--ink-2); }
+  .meter { height: 6px; border-radius: 3px; background: var(--grid); margin-top: 4px; overflow: hidden; }
+  .meter > div { height: 100%; border-radius: 3px; background: var(--good); }
+  .system { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 13px; color: var(--ink-2); }
+  .system b { color: var(--ink); font-weight: 600; }
+  .chart-wrap { position: relative; }
+  svg { display: block; width: 100%; overflow: visible; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--ink-2); margin-bottom: 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .tip { position: absolute; pointer-events: none; background: var(--surface); color: var(--ink);
+         box-shadow: 0 2px 10px rgba(0,0,0,.18), inset 0 0 0 1px var(--ring); border-radius: 8px;
+         padding: 8px 10px; font-size: 13px; display: none; white-space: nowrap; z-index: 2; }
+  .tip .row { display: flex; align-items: center; gap: 8px; }
+  .tip .key { width: 12px; height: 2px; display: inline-block; }
+  .tip strong { font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; color: var(--ink-2); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--axis); white-space: nowrap; }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.fresh td { animation: fresh 2s ease-out; }
+  @keyframes fresh { from { background: var(--grid); } to { background: transparent; } }
+  details { margin-top: 8px; font-size: 13px; }
+  summary { cursor: pointer; color: var(--ink-2); }
+  .stale { opacity: .55; }
+  @media (max-width: 520px) { main { padding: 10px; } .v { font-size: 15px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>RF Survey Deck</h1>
+    <span class="sub" id="host"></span>
+    <span class="sub" id="config"></span>
+  </header>
+  <div class="banner" id="clock-banner"></div>
+  <div class="banner" id="offline-banner"></div>
+
+  <div class="grid" id="receivers"></div>
+
+  <div class="card"><div class="system" id="system"></div></div>
+
+  <div class="card">
+    <h2>Events per minute, last hour</h2>
+    <div class="legend" id="legend"></div>
+    <div class="chart-wrap" id="chart-wrap">
+      <svg id="chart" role="img" aria-label="Events per minute over the last hour, by receiver"></svg>
+      <div class="tip" id="tip"></div>
+    </div>
+    <details><summary>Show as a table</summary><div class="scroll"><table id="activity-table"></table></div></details>
+  </div>
+
+  <div class="card">
+    <h2>Recent events</h2>
+    <div class="scroll"><table id="events"></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Busiest channels, last hour <span class="sub">— updates every minute</span></h2>
+    <div class="scroll"><table id="channels"></table></div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const RX = ["uhf", "vhf"];
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") n.className = v;
+    else if (k === "style") n.setAttribute("style", v);
+    else if (k === "text") n.textContent = v;
+    else n.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid != null) n.append(kid);
+  return n;
+};
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const hhmmss = (t) => new Date(t * 1000).toISOString().slice(11, 19);
+const hhmm = (t) => new Date(t * 1000).toISOString().slice(11, 16);
+const ago = (s) => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
+const fmtInt = (n) => (n ?? 0).toLocaleString("en-US");
+
+async function getJSON(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+}
+
+// Status never by colour alone: an icon and a word ride with it.
+function stateBadge(kind, label) {
+  const icon = { good: "✓", warning: "▲", serious: "▲", critical: "✕", idle: "○" }[kind];
+  const color = { good: "--good", warning: "--warning", serious: "--serious", critical: "--critical", idle: "--muted" }[kind];
+  const b = el("span", { class: "state" });
+  b.append(el("span", { class: "dot", style: `background: var(${color})` }), el("span", { text: `${icon} ${label}` }));
+  return b;
+}
+
+function kv(label, value, extra) {
+  const box = el("div");
+  box.append(el("div", { class: "k", text: label }));
+  const v = el("div", { class: "v" });
+  if (value instanceof Node) v.append(value); else v.textContent = value;
+  box.append(v);
+  if (extra) box.append(extra);
+  return box;
+}
+
+function renderReceivers(s) {
+  const wrap = $("receivers");
+  wrap.replaceChildren();
+  for (const rx of RX) {
+    const r = s.receivers[rx] || {};
+    const card = el("div", { class: "card" });
+    const head = el("div", { class: "rx-head" });
+    head.append(el("span", { class: "swatch", style: `background: var(--${rx})` }),
+                el("span", { class: "rx-name", text: rx.toUpperCase() }));
+    const fresh = r.alive && r.age_s < 60;
+    let badge;
+    if (r.unit === "active" && fresh) badge = stateBadge("good", "running");
+    else if (r.unit === "active") badge = stateBadge("warning", "starting");
+    else if (r.unit === "failed") badge = stateBadge("critical", "failed");
+    else badge = stateBadge("idle", r.unit || "stopped");
+    head.append(badge);
+    card.append(head);
+
+    if (r.unit === "active" && fresh) {
+      const w = r.window || {};
+      const grid = el("div", { class: "kv" });
+      const centre = w.center_hz ? `${(w.center_hz / 1e6).toFixed(3)} MHz` : "tuning";
+      let left = "";
+      if (w.dwell_s && w.opened_at) left = `${ago(Math.max(0, w.opened_at + w.dwell_s - s.now))} left`;
+      const cv = el("span"); cv.append(document.createTextNode(centre), el("small", { text: `  ${w.label || ""} ${left}` }));
+      grid.append(kv("Listening", cv));
+
+      const pct = r.fps && r.target ? Math.min(1, r.fps / r.target) : 0;
+      const meter = el("div", { class: "meter" });
+      const fill = el("div", { style: `width:${(pct * 100).toFixed(1)}%; background: var(${pct >= 0.97 ? "--good" : pct >= 0.9 ? "--warning" : "--critical"})` });
+      meter.append(fill);
+      grid.append(kv("Keeping up", r.fps ? `${r.fps.toFixed(1)} / ${Math.round(r.target)} fps` : "—", meter));
+
+      const ovf = r.overflows || 0;
+      grid.append(kv("Dropped samples", ovf === 0 ? stateBadge("good", "none") :
+                     stateBadge(ovf < 50 ? "warning" : "critical", `${fmtInt(ovf)} overflows`)));
+      const lin = w.linearity;
+      grid.append(kv("Front end", lin === "linear" ? stateBadge("good", "linear") :
+                     lin === "compressed" ? stateBadge("critical", "compressed") :
+                     stateBadge("warning", lin || "checking")));
+      const ev = el("span"); ev.append(document.createTextNode(fmtInt(r.events)), el("small", { text: `  ${fmtInt(Math.round(r.events_per_hr || 0))}/hr` }));
+      grid.append(kv("Events", ev));
+      const an = el("span"); an.append(document.createTextNode(fmtInt(r.analysed)),
+                                       el("small", { text: `  skipped ${fmtInt(r.skipped)}${r.aged ? `, aged ${fmtInt(r.aged)}` : ""}` }));
+      grid.append(kv("Analysed", an));
+      card.append(grid);
+      card.append(el("div", { class: "sub", style: "margin-top:8px",
+        text: `${r.engine} engine · gain ${r.gain} · run ${r.run_id} · up ${ago(s.now - r.started_at)} · updated ${ago(r.age_s)} ago` }));
+    } else if (r.unit === "active") {
+      card.append(el("div", { class: "sub", text: "Started; waiting for its first report (the front-end check takes a few seconds)." }));
+    } else {
+      card.append(el("div", { class: "sub", text: "Not running. Start it from the deck menu over SSH: deck → 2." }));
+    }
+    wrap.append(card);
+  }
+}
+
+function renderSystem(s) {
+  const sys = s.system;
+  const box = $("system");
+  box.replaceChildren();
+  const item = (label, value, cls) => { const sp = el("span"); sp.append(document.createTextNode(`${label} `), el("b", { text: value })); if (cls) sp.append(cls); return sp; };
+  const t = sys.temp_c;
+  box.append(item("temperature", t == null ? "?" : `${t.toFixed(1)} °C`,
+                  t >= 75 ? stateBadge("critical", "hot") : t >= 68 ? stateBadge("warning", "warm") : null));
+  box.append(item("load", sys.load1 == null ? "?" : sys.load1.toFixed(2)));
+  box.append(item("disk free", `${Math.round(sys.disk_free_gb)} GB`));
+  box.append(item("wifi", sys.wifi || "none"));
+  if (sys.ip) box.append(item("address", sys.ip));
+  if (sys.tailscale) box.append(item("tailscale", sys.tailscale));
+
+  $("host").textContent = `${s.host} · ${hhmmss(s.now)} UTC`;
+  $("config").textContent = `profile ${s.profile.replace("profiles/", "")} · ${s.engine} engine · ${s.db}`;
+  const cb = $("clock-banner");
+  if (s.clock_synced) { cb.style.display = "none"; }
+  else {
+    cb.replaceChildren(stateBadge("warning", "Clock not set"),
+      document.createTextNode(" The deck has not reached a time server since it powered on, so dates and times may be weeks out. Note the real time you powered it on; runs can be corrected afterwards."));
+    cb.style.display = "block";
+  }
+}
+
+// ---- activity chart: stacked columns, one axis ---------------------------------
+let activity = null;
+
+function niceMax(v) {
+  if (v <= 0) return 4;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+  return 10 * p;
+}
+
+function topRoundedRect(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h));
+  return `M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z`;
+}
+
+function renderActivity() {
+  const svg = $("chart");
+  const legend = $("legend");
+  legend.replaceChildren(...RX.map(rx => { const s = el("span"); s.append(el("span", { class: "swatch", style: `background: var(--${rx})` }), document.createTextNode(rx.toUpperCase())); return s; }));
+  svg.replaceChildren();
+  const data = activity && activity.bins;
+  const W = $("chart-wrap").clientWidth, H = 200;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("height", H);
+  const NS = "http://www.w3.org/2000/svg";
+  const s = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+  if (!data || !data.length) {
+    const t = s("text", { x: 0, y: 24, fill: css("--muted"), "font-size": 13 }); t.textContent = data === null ? "No database yet." : "Nothing heard yet."; svg.append(t);
+    return;
+  }
+  const L = 40, R = 8, T = 8, B = 24, pw = W - L - R, ph = H - T - B;
+  const totals = data.map(b => RX.reduce((a, rx) => a + (b[rx] || 0), 0));
+  const ymax = niceMax(Math.max(...totals));
+  const y = (v) => T + ph - (v / ymax) * ph;
+  for (let i = 0; i <= 4; i++) {
+    const v = (ymax / 4) * i, yy = Math.round(y(v)) + 0.5;
+    svg.append(s("line", { x1: L, x2: W - R, y1: yy, y2: yy, stroke: css(i === 0 ? "--axis" : "--grid"), "stroke-width": 1 }));
+    const lab = s("text", { x: L - 6, y: yy + 4, "text-anchor": "end", "font-size": 11, fill: css("--muted"), style: "font-variant-numeric: tabular-nums" });
+    lab.textContent = Number.isInteger(v) ? v.toLocaleString("en-US") : v.toFixed(1); svg.append(lab);
+  }
+  const slot = pw / data.length, bw = Math.max(1, Math.min(24, slot - 2));
+  data.forEach((b, i) => {
+    const x = L + i * slot + (slot - bw) / 2;
+    if (i % 15 === 0 || i === data.length - 1) {
+      const lab = s("text", { x: x + bw / 2, y: H - 6, "text-anchor": "middle", "font-size": 11, fill: css("--muted") });
+      lab.textContent = hhmm(b.t); svg.append(lab);
+    }
+    let base = 0;
+    const present = RX.filter(rx => b[rx] > 0);
+    present.forEach((rx, j) => {
+      const top = base + b[rx];
+      const y0 = y(base), y1 = y(top);
+      const isTop = j === present.length - 1;
+      // 2px surface gap between stacked segments.
+      const hgt = Math.max(0, y0 - y1 - (j > 0 ? 2 : 0));
+      const yTop = y1;
+      if (hgt > 0) {
+        svg.append(isTop ? s("path", { d: topRoundedRect(x, yTop, bw, hgt, 4), fill: css(`--${rx}`) })
+                         : s("rect", { x, y: yTop, width: bw, height: hgt, fill: css(`--${rx}`) }));
+      }
+      base = top;
+    });
+    // Hit target: the whole slot, taller than the mark.
+    const hit = s("rect", { x: L + i * slot, y: T, width: slot, height: ph, fill: "transparent", tabindex: 0,
+                            "aria-label": `${hhmm(b.t)} UTC: ${RX.map(rx => `${rx.toUpperCase()} ${b[rx]}`).join(", ")}` });
+    const show = (ev) => showTip(b, x + bw / 2, ev);
+    hit.addEventListener("pointermove", show);
+    hit.addEventListener("focus", show);
+    hit.addEventListener("pointerleave", hideTip);
+    hit.addEventListener("blur", hideTip);
+    svg.append(hit);
+  });
+  renderActivityTable(data);
+}
+
+function showTip(b, cx) {
+  const tip = $("tip");
+  tip.replaceChildren(el("div", { class: "sub", text: `${hhmm(b.t)}–${hhmm(b.t + 60)} UTC` }));
+  for (const rx of RX) {
+    const row = el("div", { class: "row" });
+    row.append(el("strong", { text: fmtInt(b[rx]) }), el("span", { class: "key", style: `background: var(--${rx})` }), el("span", { class: "sub", text: rx.toUpperCase() }));
+    tip.append(row);
+  }
+  tip.style.display = "block";
+  const W = $("chart-wrap").clientWidth;
+  const left = Math.min(Math.max(0, cx - tip.offsetWidth / 2), W - tip.offsetWidth);
+  tip.style.left = `${left}px`;
+  tip.style.top = `-4px`;
+}
+function hideTip() { $("tip").style.display = "none"; }
+
+function renderActivityTable(data) {
+  const t = $("activity-table");
+  const head = el("tr"); head.append(el("th", { text: "minute (UTC)" }), ...RX.map(rx => el("th", { class: "num", text: rx.toUpperCase() })));
+  const rows = data.slice().reverse().filter(b => RX.some(rx => b[rx])).map(b => {
+    const tr = el("tr"); tr.append(el("td", { text: hhmm(b.t) }), ...RX.map(rx => el("td", { class: "num", text: fmtInt(b[rx]) }))); return tr;
+  });
+  t.replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
+}
+
+// ---- tables -------------------------------------------------------------------
+let seenEvents = new Set();
+
+function renderEvents(d) {
+  const t = $("events");
+  if (d.events === null) { t.replaceChildren(el("tr", {}, el("td", { class: "muted", text: "No database yet — it is created when the survey first starts." }))); return; }
+  const head = el("tr");
+  for (const [h, n] of [["time UTC"], ["rx"], ["MHz", 1], ["channel"], ["duration", 1], ["SNR dB", 1], ["tone"], [""]]) head.append(el("th", { class: n ? "num" : "", text: h }));
+  const next = new Set();
+  const rows = d.events.map(e => {
+    const key = `${e.t}-${e.freq_hz}-${e.rx}`; next.add(key);
+    const tr = el("tr", { class: seenEvents.size && !seenEvents.has(key) ? "fresh" : "" });
+    const rx = el("td"); rx.append(el("span", { class: "swatch", style: `background: var(--${e.rx}); margin-right:6px` }), document.createTextNode(e.rx.toUpperCase()));
+    const flags = [e.on_air ? "on air" : "", e.harmonic ? "harmonic" : "", e.overload ? "overload" : ""].filter(Boolean).join(", ");
+    tr.append(el("td", { text: hhmmss(e.t) }), rx, el("td", { class: "num", text: (e.freq_hz / 1e6).toFixed(4) }),
+              el("td", { text: e.channel }), el("td", { class: "num", text: e.on_air ? "—" : `${e.duration_s.toFixed(2)} s` }),
+              el("td", { class: "num", text: e.snr_db == null ? "" : e.snr_db.toFixed(1) }), el("td", { text: e.tone }),
+              el("td", { class: "muted", text: flags }));
+    return tr;
+  });
+  seenEvents = next;
+  t.replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
+}
+
+function renderChannels(d) {
+  const t = $("channels");
+  if (d.channels === null) { t.replaceChildren(el("tr", {}, el("td", { class: "muted", text: "No database yet." }))); return; }
+  if (!d.channels.length) { t.replaceChildren(el("tr", {}, el("td", { class: "muted", text: "Nothing heard in the last hour." }))); return; }
+  const head = el("tr");
+  for (const [h, n] of [["MHz", 1], ["channel"], ["rx"], ["events", 1], ["airtime", 1], ["peak dB", 1], ["tones"]]) head.append(el("th", { class: n ? "num" : "", text: h }));
+  const rows = d.channels.map(c => {
+    const tr = el("tr");
+    const rx = el("td"); rx.append(el("span", { class: "swatch", style: `background: var(--${c.rx}); margin-right:6px` }), document.createTextNode(c.rx.toUpperCase()));
+    tr.append(el("td", { class: "num", text: (c.freq_hz / 1e6).toFixed(4) }), el("td", { text: c.channel }), rx,
+              el("td", { class: "num", text: fmtInt(c.events) }), el("td", { class: "num", text: `${Math.round(c.airtime_s)} s` }),
+              el("td", { class: "num", text: c.peak_snr_db == null ? "" : c.peak_snr_db.toFixed(1) }), el("td", { text: c.tones }));
+    return tr;
+  });
+  t.replaceChildren(el("thead", {}, head), el("tbody", {}, ...rows));
+}
+
+// ---- polling: each at the rate its data changes, not faster ---------------------
+function every(ms, fn) {
+  const tick = async () => {
+    try { await fn(); $("offline-banner").style.display = "none"; document.body.classList.remove("stale"); }
+    catch (err) {
+      const b = $("offline-banner");
+      b.replaceChildren(stateBadge("critical", "Cannot reach the deck"), document.createTextNode(` ${err.message}. Showing the last data received.`));
+      b.style.display = "block"; document.body.classList.add("stale");
+    }
+    setTimeout(tick, ms);
+  };
+  tick();
+}
+every(3000, async () => { const s = await getJSON("/api/status"); renderSystem(s); renderReceivers(s); });
+every(5000, async () => renderEvents(await getJSON("/api/events?limit=40")));
+every(30000, async () => { activity = await getJSON("/api/activity"); renderActivity(); });
+every(60000, async () => renderChannels(await getJSON("/api/channels?minutes=60")));
+window.addEventListener("resize", () => renderActivity());
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => renderActivity());
+</script>
+</body>
+</html>

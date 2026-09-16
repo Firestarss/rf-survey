@@ -37,6 +37,7 @@ import time
 import numpy as np
 
 import db
+import status
 import survey_prototype as sp
 
 ENGINE = pathlib.Path(__file__).resolve().parent.parent / "engine" / "target" / "release" / "rfsurvey-engine"
@@ -242,6 +243,7 @@ class EngineCaptureLoop:
         self.analyze_ms = 0.0
         self.last_engine_stats = {}
         self.session_start = time.time()
+        self.window_info = {}
 
         self.running = threading.Event()
         self.running.set()
@@ -321,6 +323,23 @@ class EngineCaptureLoop:
             self.store = sp.CaptureStore(self.args.capture_dir, run_id,
                                          max_mb=self.args.capture_mb,
                                          keep_iq=self.args.capture_iq)
+        self._publish()
+
+    def _publish(self, state="running"):
+        e = self.last_engine_stats
+        uptime_h = (time.time() - self.session_start) / 3600.0
+        status.write(self.args.receiver_id, {
+            "state": state, "engine": "rust", "profile": self.args.profile, "db": self.args.db,
+            "run_id": self.run_id, "serial": self.serial, "rate": self.rate,
+            "gain": self.settings["gain"], "started_at": self.session_start,
+            "window": self.window_info,
+            "fps": e.get("fps"), "target": e.get("target"), "overflows": e.get("overflows", 0),
+            "active": e.get("active"), "clip": e.get("clip", 0), "desense": e.get("desense", 0),
+            "cost_ms": e.get("dsp_ms"), "events": self.events_logged,
+            "events_per_hr": self.events_logged / max(uptime_h, 1 / 60),
+            "analysed": self.analyses_total, "skipped": self.analyses_skipped,
+            "aged": self.analyses_aged, "harmonics": self.harmonics_found,
+        })
 
     # -- the loop ------------------------------------------------------------
 
@@ -353,6 +372,8 @@ class EngineCaptureLoop:
         self.window_id = db.open_window(self.conn, self.run_id, self.args.receiver_id,
                                         int(self.center), int(self.rate), w["label"])
         self.log.window_id = self.window_id
+        self.window_info = {"center_hz": self.center, "label": w["label"], "opened_at": time.time(),
+                            "dwell_s": dwell_s, "linearity": None if linearity else "unchecked"}
         print(f"\n== {self.center/1e6:.3f} MHz"
               + (f" ({w['label']})" if w["label"] else "")
               + (f", {dwell_s:.0f} s" if dwell_s else "")
@@ -361,6 +382,7 @@ class EngineCaptureLoop:
             db.set_window_linearity(self.conn, self.window_id, "unchecked")
         win = self._wait_for("window", timeout=60.0)
         self._apply_window(win)
+        self._publish()
 
     def _apply_window(self, m):
         self.window_t0 = float(m["wall0"])
@@ -403,6 +425,7 @@ class EngineCaptureLoop:
             self._antenna(m["median_db"])
         elif t == "stats":
             self.last_engine_stats = m
+            self._publish()
             self._stats(m)
         elif t in ("stall", "eof", "__eof__", "error"):
             self.engine_exit = m
@@ -455,6 +478,7 @@ class EngineCaptureLoop:
 
     def _linearity(self, m):
         verdict = m["verdict"]
+        self.window_info["linearity"] = verdict
         if self.window_id is not None:
             db.set_window_linearity(self.conn, self.window_id, verdict)
         gain = float(self.settings["gain"])
@@ -592,6 +616,8 @@ class EngineCaptureLoop:
         except OSError:
             pass
 
+        if self.run_id is not None:
+            self._publish(state="stopped")
         e = self.last_engine_stats
         print(f"\nstopped. overflows: {e.get('overflows', 0)}  events: {self.events_logged}  "
               f"analysed: {self.analyses_total}  skipped: {self.analyses_skipped}  "

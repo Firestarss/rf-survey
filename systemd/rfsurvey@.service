@@ -42,21 +42,33 @@ Type=simple
 User=firestarss
 WorkingDirectory=/home/firestarss/rfsurvey
 
-# Per-instance overrides, optional — the leading `-` means a missing file is
-# not an error, so an uninstalled instance still starts on the defaults. This is
-# what lets one unit serve both a bench run and a month-long deployment without
-# editing the unit: put --freq, a different --db, or a capture budget in
-# systemd/rfsurvey-<instance>.env and reinstall.
+# Configuration, in order of precedence (later wins):
+#   the defaults below
+#   systemd/rfsurvey.env        shared by both receivers: profile, engine,
+#                               database, capture directory and budget
+#   systemd/rfsurvey-<rx>.env   per-receiver overrides, normally empty
+# All three are read from the repository, so a change needs no reinstall — only
+# a restart. `deck` (tools/deck.py) edits rfsurvey.env from a menu. The leading
+# "-" means a missing file is not an error.
 #
-# RFSURVEY_ARGS is deliberately unquoted below so systemd word-splits it.
-# RFSURVEY_DB is braced because a path must not be split.
+# Braced ${VAR} for single values so a path is never word-split; RFSURVEY_ARGS is
+# unbraced on purpose so extra flags split into separate arguments.
+Environment=RFSURVEY_PROFILE=profiles/festival.yaml
+Environment=RFSURVEY_ENGINE=python
 Environment=RFSURVEY_DB=data/survey.sqlite
+Environment=RFSURVEY_CAPTURE_DIR=data/captures/default
+Environment=RFSURVEY_CAPTURE_MB=2000
+Environment=RFSURVEY_ARGS=
+EnvironmentFile=-/home/firestarss/rfsurvey/systemd/rfsurvey.env
 EnvironmentFile=-/home/firestarss/rfsurvey/systemd/rfsurvey-%i.env
 
 ExecStart=/usr/bin/python3 src/survey_prototype.py \
     --receiver-id %i \
-    --profile profiles/festival.yaml \
+    --profile ${RFSURVEY_PROFILE} \
+    --engine ${RFSURVEY_ENGINE} \
     --db ${RFSURVEY_DB} \
+    --capture-dir ${RFSURVEY_CAPTURE_DIR} \
+    --capture-mb ${RFSURVEY_CAPTURE_MB} \
     --stats $RFSURVEY_ARGS
 
 # on-failure, deliberately, not always.

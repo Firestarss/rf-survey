@@ -16,6 +16,13 @@ import sys
 import tempfile
 import unittest
 
+import os
+
+# Tests must never publish into the live deck's status files, which the deck tool
+# and dashboard read. Set before src/status.py is imported, and inherited by the
+# subprocesses the end-to-end tests start.
+os.environ.setdefault("RFSURVEY_STATUS_DIR", tempfile.mkdtemp(prefix="rfsurvey-test-status-"))
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:

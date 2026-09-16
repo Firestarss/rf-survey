@@ -8,6 +8,36 @@ Run all of them from the repository root.
 
 ---
 
+## Running the deck
+
+### `deck` — the menu
+
+`deck` (installed as `/usr/local/bin/deck`, source `tools/deck.py`). A numbered
+menu over SSH for everything an operator does: start, stop and restart either
+receiver, live status, recent events and busiest channels, change profile, engine
+or database, measure an antenna with padcal, boot checks, dashboard, start at
+boot, logs, and power. Built for an iPad keyboard: no arrow keys, no arguments.
+
+It edits one file, `systemd/rfsurvey.env`, keeping its comments, and reads the
+survey's state from the status files each capture loop publishes in `/dev/shm`
+(`src/status.py`) — never from the running processes. `deck status`,
+`deck events [N]` and `deck channels [MIN]` print without the menu.
+
+### `dashboard.py` — the web page
+
+`rfsurvey-dashboard.service`, port 8080; `deck → 12` starts, stops and enables it.
+One self-contained page — no internet — showing receiver state, events per minute,
+recent events and busiest channels, refreshed at the rate each changes. Runs in
+the idle scheduling class with cached database reads; measured at zero overflows
+on both receivers under deliberately heavy polling. `--db` browses an archived run.
+
+### `wildfire-ready` — before unplugging
+
+Stops the survey cleanly, reports the soak (restarts, errors, overflows), archives
+its data so the event starts with an empty database, checks the radios, engine and
+boot invariants, and powers off only if everything is clean. `--dry-run` changes
+nothing. Also `deck → 15`.
+
 ## Field instruments
 
 ### `padcal.py` — how much attenuation does this site want?

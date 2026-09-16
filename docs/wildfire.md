@@ -3,20 +3,64 @@
 Everything needed at camp, in the order you need it. The survey starts by itself
 at power-on — there is nothing to type to make it run.
 
-## The two chains
+## The two chains — Nagoya NA-771 on both
 
-Radios are addressed by serial, so it does not matter which USB port each goes
-in, **but the pads do not move with the software** — the 5 dB radio and the
-20 dB radio must not be swapped. Label them.
+**Which radio is which:** tonight the UHF Airspy is the one with the **Signal
+Stick** on it, and the VHF Airspy is the one with the **dummy load**. Label them
+now, before anything is unscrewed. The software finds each radio by serial, so it
+does not matter which USB port each goes in — but the attenuation is in the cable
+run, not the software, and swapping the radios puts 20 dB on UHF and 5 dB on VHF.
 
-| role | Airspy serial | chain, antenna end first | profile |
-|---|---|---|---|
-| **UHF** | `…2e4c6dd7` | antenna → 2 dB → 3 dB → Airspy | 466 / 446 MHz, gain 42 |
-| **VHF** | `…2f2f31d7` | antenna → **Flamingo** → 10 dB → 10 dB → Airspy | 146 / 154.95 MHz, gain 42 |
+| | UHF | VHF |
+|---|---|---|
+| Airspy serial | `637862dc2e4c6dd7` | `637862dc2f2f31d7` |
+| has on it tonight | Signal Stick | dummy load |
+| listens to | 466.000 (300 s) and 446.000 (60 s) MHz | 146.000 and 154.950 MHz, 180 s each |
+| attenuation | **5 dB** (2 dB + 3 dB) | **20 dB** (10 dB + 10 dB) |
+| FM notch | none | **Flamingo** |
 
-- One radio in **each black USB port** (they are separate USB controllers). Not the blue ports.
-- Both antennas are 2 m / 70 cm dual-band, so either antenna works on either chain.
-- Official 27 W PSU. A phone charger or power bank will limit USB current.
+**Full path, antenna end first:**
+
+```
+UHF   NA-771 → antenna adaptor → 2 dB pad → 3 dB pad → SMA cable → Airspy ...6dd7 → USB → black USB port
+VHF   NA-771 → antenna adaptor → Flamingo → 10 dB pad → 10 dB pad → SMA cable → Airspy ...31d7 → USB → other black USB port
+```
+
+**Changes from tonight's setup:**
+
+UHF radio
+1. Unscrew the Signal Stick.
+2. Take the Flamingo out of this chain; the adaptor now screws straight onto the 2 dB pad.
+3. Fit the NA-771.
+
+VHF radio
+1. Unscrew the dummy load. **Keep it** — the antenna measurement needs it.
+2. Build adaptor → Flamingo (moved from UHF) → 10 dB → 10 dB → SMA cable onto the Airspy.
+3. Fit the NA-771.
+
+You need **a second antenna adaptor** for the second chain, the same kind the
+Signal Stick uses if the NA-771s have the same connector. The two 10 dB pads are
+the ones taken off before the second propagation walk.
+
+- One radio in **each black USB port** — they are separate USB controllers. Not the blue ports.
+- Keep the two antennas **apart**: a metre if you can, and never touching.
+- Official 27 W PSU.
+
+### Measure after swapping antennas — this is not optional
+
+The working gain belongs to the antenna, not the radio: swapping NA-701 for
+Signal Stick moved it from 39 to 42 on 2026-09-16. Neither chain has been
+measured with an NA-771, and VHF's gain of 42 was never measured at all. So once
+both are built:
+
+```
+deck  →  10  Measure antenna & attenuation
+```
+
+Once per radio. It stops that receiver, asks you to fit the antenna and then the
+dummy load, reports the lowest gain that is still linear and the attenuation it
+would choose, offers to write the gain into the profile, and reminds you to put
+the antenna back.
 
 ## Before leaving
 
@@ -52,6 +96,56 @@ Under heavy traffic a small share of events are logged without tone analysis
 That keeps uhf at 10 MSPS and runs vhf at 2.5 MSPS over five narrower windows,
 measured at zero vhf overflows.
 
+## Running it: `deck`
+
+SSH in (Blink or Termius on the iPad, any terminal on a laptop) and type `deck`.
+Numbered menu, nothing to remember:
+
+```
+ 1 Live status          6 Busiest channels          11 Boot checks
+ 2 Start survey         7 Change profile            12 Web dashboard
+ 3 Stop survey          8 Change engine             13 Start at boot
+ 4 Restart survey       9 New run / database        14 Logs
+ 5 Recent events (live) 10 Measure antenna (padcal) 15 WildFire ready / reboot / power off
+```
+
+`deck status`, `deck events 50` and `deck channels 60` work without the menu.
+Everything the menu changes is a line in `systemd/rfsurvey.env`.
+
+## Watching it: the dashboard
+
+A web page served by the deck itself: receiver state, whether each radio is
+keeping up, events per minute over the last hour, recent events with channel
+names and tones, and the busiest channels. Self-contained — no internet needed.
+
+```
+http://<deck address>:8080        same network as the deck
+http://100.82.163.31:8080         over Tailscale, where there is internet
+http://radio-deck.local:8080      by name, if the network allows it
+```
+
+Start, stop or enable it at boot from `deck → 12`. It shows the deck's live data
+and needs no login, so anyone on the same network can open it — fine on your
+hotspot, worth a thought on the lodge WiFi.
+
+Measured 2026-09-16 with both radios surveying at 10 MSPS under ~22,000
+events/hour, the dashboard pointed at a 1.2-million-event database and three
+simulated browsers polling every endpoint once a second for four minutes:
+**zero overflows on either radio**. It runs in the idle scheduling class, and its
+expensive queries are cached for 30-60 s however many browsers are open.
+
+**Getting a page to the iPad at camp**, best first:
+
+1. **Your hotspot.** iPad and deck both join `What iPhone?`; open the deck's
+   address. Works anywhere you have the phone, internet or not.
+2. **Tailscale**, if the lodge WiFi or the hotspot has internet.
+3. **The lodge WiFi directly** — only if it lets devices see each other, which
+   public WiFi often does not.
+
+Longer term, the robust answer is the deck broadcasting **its own WiFi network**
+for the iPad to join — no infrastructure at all. It needs a USB WiFi adapter so
+the Pi's built-in radio can stay a client; not attempted tonight.
+
 ## At camp
 
 1. Antennas on, both chains assembled, radios in the black ports.
@@ -86,23 +180,17 @@ Known networks: **`jnwwifi`** (the lodge) and **`What iPhone?`** (your hotspot).
   internet. Direct connections between devices on public WiFi are usually
   blocked, so use the Tailscale address.
 
-Once in:
+Once in, `deck` — option 1 for live status. Or open the dashboard (above).
 
-```bash
-systemctl is-active rfsurvey@uhf rfsurvey@vhf          # both: active
-journalctl -u rfsurvey@uhf -n 400 | grep stats | tail -2 # fps, overflows, events
-journalctl -u rfsurvey@vhf -n 400 | grep stats | tail -2
-sudo ~/rfsurvey/systemd/rfsurvey-preflight              # boot checks
-```
-
-`overflow` counts dropped samples. Some are expected at 10 MSPS; a number that
-climbs every line means that receiver cannot keep up.
+`overflow` counts dropped samples. A number that climbs between refreshes means
+that receiver cannot keep up.
 
 ## If something looks wrong
 
-- **A receiver shows `failed`:** `sudo systemctl reset-failed rfsurvey@uhf && sudo systemctl start rfsurvey@uhf`
-  (or `vhf`). It gives up after 30 failures in 30 minutes, so `failed` means
-  something persistent — note it for later rather than fighting it.
+- **A receiver shows `failed`:** `deck → 14` for its log, then
+  `sudo systemctl reset-failed rfsurvey@uhf` (or `vhf`) and `deck → 2`. It gives
+  up after 30 failures in 30 minutes, so `failed` means something persistent —
+  note it for later rather than fighting it.
 - **Unreachable:** the survey does not need the network and is almost certainly
   still logging. Do not pull power just to regain access; that costs a run
   boundary and a misdated restart.
@@ -112,4 +200,6 @@ climbs every line means that receiver cannot keep up.
 Pulling the power at the end is fine — every event is committed as it is
 written. `sudo poweroff` is tidier if you are connected.
 
-Data comes home in `data/wildfire.sqlite` and `data/captures/wildfire/`.
+Data comes home in `data/wildfire.sqlite` and `data/captures/wildfire/`, or
+wherever `deck → 9` pointed it. Browse any past run on the dashboard with
+`python3 tools/dashboard.py --port 8081 --db data/<run>.sqlite`.

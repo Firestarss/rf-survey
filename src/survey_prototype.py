@@ -42,6 +42,7 @@ import scipy.fft as sfft
 from scipy.signal import firwin, lfilter, upfirdn
 
 import db
+import status
 import dcs as dcs_mod
 
 # ---------------------------------------------------------------------------
@@ -2069,12 +2070,15 @@ class CaptureLoop:
                                         self.args.receiver_id, int(center),
                                         int(self.rate), w["label"])
         self.log.window_id = self.window_id
+        self.window_info = {"center_hz": center, "label": w["label"], "opened_at": time.time(),
+                            "dwell_s": dwell_s, "linearity": None}
         print(f"\n== {center/1e6:.3f} MHz"
               + (f" ({w['label']})" if w["label"] else "")
               + (f", {dwell_s:.0f} s" if dwell_s else "")
               + " ==")
         self.check_linearity()
         self._antenna_checked = False
+        self._publish()
 
     def check_antenna(self):
         """Warn if the front end looks terminated rather than connected.
@@ -2129,10 +2133,12 @@ class CaptureLoop:
             # check can only ever return "inconclusive". Skipping says that
             # plainly instead of writing a verdict that means nothing.
             db.set_window_linearity(self.conn, self.window_id, "unchecked")
+            self.window_info["linearity"] = "unchecked"
             return
         verdict = self.radio.linearity(self.det.grid, self.periodogram,
                                        self.chunk, self.settings["gain"])
         db.set_window_linearity(self.conn, self.window_id, verdict)
+        self.window_info["linearity"] = verdict
         if verdict == "compressed":
             print(f"   ** FRONT END COMPRESSED at gain "
                   f"{self.settings['gain']:.0f} — this band is too strong for "
@@ -2384,12 +2390,28 @@ class CaptureLoop:
               + (f"  SKIPPED {self.worker.skipped}" if self.worker.skipped else ""))
         print(f"        clip {self.overload.clip_frames}   "
               f"desense {self.overload.desense_frames}")
+        self._publish(fps=fps, cost_ms=d_ms, active=active)
         self.detect_ms = self.analyze_ms = 0.0
         self.analyses = 0
         self.stat_frames = 0
         self.last_stat = time.time()
 
     # -- teardown ------------------------------------------------------------
+
+    def _publish(self, state="running", fps=None, cost_ms=None, active=None):
+        uptime_h = (time.time() - self.session_start) / 3600.0
+        status.write(self.args.receiver_id, {
+            "state": state, "engine": "python", "profile": self.args.profile, "db": self.args.db,
+            "run_id": self.run_id, "serial": getattr(self, "serial_seen", None), "rate": self.rate,
+            "gain": self.settings["gain"], "started_at": self.session_start,
+            "window": getattr(self, "window_info", {}),
+            "fps": fps, "target": self.rate / self.fs, "overflows": self.overflows,
+            "active": active, "clip": self.overload.clip_frames,
+            "desense": self.overload.desense_frames, "cost_ms": cost_ms,
+            "events": self.events_logged, "events_per_hr": self.events_logged / max(uptime_h, 1 / 60),
+            "analysed": self.analyses_total, "skipped": self.worker.skipped,
+            "aged": 0, "harmonics": self.harmonics_found,
+        })
 
     def finish(self):
         """Close everything that is open, then say how it went.
@@ -2411,6 +2433,7 @@ class CaptureLoop:
         self.conn.close()
         self.radio.stop()
 
+        self._publish(state="stopped")
         print(f"\nstopped. overflows: {self.overflows}  "
               f"events: {self.events_logged}  "
               f"analysed: {self.analyses_total}  "
@@ -2502,6 +2525,7 @@ def run(args):
     radio.start()
 
     loop = CaptureLoop(radio, settings, args, conn, run_id, rate, center)
+    loop.serial_seen = serial
     # After the loop, not before: frame_size() is what the analysis asks for and
     # loop.fs is what the driver will actually deliver. Printing the request
     # rather than the reality said "13.1 ms frames (76/sec)" on a 10 MSPS run

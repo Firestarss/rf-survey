@@ -18,7 +18,14 @@ cd "$(dirname "$0")/.." || exit 1
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 if [ "$DRY" = 0 ] && [ "$(id -u)" != 0 ]; then echo "run with sudo (or --dry-run)"; exit 1; fi
 G=/usr/bin/grep
-since=$(cat data/soak-started 2>/dev/null || echo "-12 hours")
+# The soak began when the running survey started — asked of systemd, so a survey
+# started from the deck menu is measured from its own start and not from earlier
+# test runs, which would otherwise be reported as restarts.
+since=$(cat data/soak-started 2>/dev/null)
+if [ -z "$since" ]; then
+    ts=$(systemctl show rfsurvey@uhf -p ActiveEnterTimestamp --value 2>/dev/null)
+    since=${ts:-"-12 hours"}
+fi
 bad=0
 
 echo "== soak since $since =="
@@ -63,10 +70,13 @@ stamp=$(date -u +%Y%m%dT%H%MZ)
 dest=data/soak-$stamp
 mkdir -p "$dest"
 moved=0
-for f in data/wildfire.sqlite data/wildfire.sqlite-wal data/wildfire.sqlite-shm data/wildfire.sqlite.schema-lock; do
+# Whatever database and capture directory the survey is configured to use.
+db=$(sed -n 's/^RFSURVEY_DB=//p' systemd/rfsurvey.env | tail -1); db=${db:-data/wildfire.sqlite}
+cap=$(sed -n 's/^RFSURVEY_CAPTURE_DIR=//p' systemd/rfsurvey.env | tail -1); cap=${cap:-data/captures/wildfire}
+for f in "$db" "$db-wal" "$db-shm" "$db.schema-lock"; do
     [ -e "$f" ] && mv "$f" "$dest/" && moved=1
 done
-[ -d data/captures/wildfire ] && mv data/captures/wildfire "$dest/captures" && moved=1
+[ -d "$cap" ] && mv "$cap" "$dest/captures" && moved=1
 chown -R firestarss:firestarss "$dest" 2>/dev/null
 [ "$moved" = 1 ] && echo "soak data archived to $dest — WildFire starts with an empty database" || rmdir "$dest"
 rm -f data/soak-started

@@ -1,0 +1,31 @@
+[Unit]
+# Web dashboard on port 8080. See tools/dashboard.py.
+Description=RF survey deck — web dashboard
+Documentation=file:/home/firestarss/rfsurvey/docs/wildfire.md
+After=network.target
+
+[Service]
+Type=simple
+User=firestarss
+WorkingDirectory=/home/firestarss/rfsurvey
+ExecStart=/usr/bin/python3 tools/dashboard.py --port 8080
+
+# The dashboard must never cost the survey samples. SCHED_IDLE runs it only when
+# no other process wants the CPU, which is stronger than any nice value — nice 19
+# alone did not stop the test suite putting overflows on both receivers.
+CPUSchedulingPolicy=idle
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=300M
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rfsurvey-dashboard
+
+NoNewPrivileges=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
