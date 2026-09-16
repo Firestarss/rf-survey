@@ -1,0 +1,29 @@
+[Unit]
+# Asserts the boot-level invariants an unattended survey depends on, and says
+# so in the journal where the first thing anyone reads after a lockup will find
+# it. See systemd/rfsurvey-preflight for what it checks and why.
+Description=RF survey deck — boot preflight checks
+Documentation=file:/home/firestarss/rfsurvey/docs/deck-boot.md
+After=local-fs.target
+Before=rfsurvey.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/firestarss/rfsurvey/systemd/rfsurvey-preflight
+
+# Root, because `nvme smart-log` needs it. Nothing here writes.
+User=root
+
+# Reports, does not gate: a survey that runs and might hang still produces
+# data, and the deck is reachable over Tailscale to act on the warning. To make
+# a failed check take the survey down instead, set STRICT=1 here AND add
+# Requires=/After= on this unit in rfsurvey@.service.
+Environment=RFSURVEY_PREFLIGHT_STRICT=0
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rfsurvey-preflight
+
+[Install]
+WantedBy=multi-user.target

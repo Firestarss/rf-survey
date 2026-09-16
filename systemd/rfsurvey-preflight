@@ -1,0 +1,99 @@
+#!/bin/bash
+# Boot-time assertion of the invariants an unattended survey depends on.
+#
+# Written 2026-09-16, after the NVMe APST fix spent weeks believed-applied and
+# never active. The fix was correct; nothing checked that it had taken effect,
+# so every lockup in that period was the known fault running untreated.
+#
+# The lesson, and the whole design of this script: VERIFY AT THE POINT OF
+# EFFECT, NOT THE POINT OF EDIT. For a boot parameter that means /proc/cmdline,
+# never the file you edited — on this machine three different files are named
+# cmdline.txt and two of them are inert.
+#
+# Exits 0 always by default: this reports, it does not gate. A survey that runs
+# and might hang still yields data; one that refuses to start yields none, and
+# the deck is reachable over Tailscale to act on the warning. Set
+# RFSURVEY_PREFLIGHT_STRICT=1 in the environment to make failures exit non-zero
+# and take rfsurvey down with them.
+set -u
+
+CMDLINE_PARAM="nvme_core.default_ps_max_latency_us=0"
+BOOT=/boot/firmware
+fail=0
+warn=0
+
+say()  { echo "$*"; }
+# bad() counts one problem and prints its first line; more() continues the same
+# problem without counting again. Without the split, a three-line explanation
+# reported itself as three faults.
+bad()  { echo "FAIL: $*" >&2; fail=$((fail+1)); }
+more() { echo "      $*" >&2; }
+soso() { echo "WARN: $*" >&2; warn=$((warn+1)); }
+
+# --- 1. Is the fix active on THIS boot? -------------------------------------
+# The only authority. A file on disk proves nothing about a running kernel.
+if grep -qF -- "$CMDLINE_PARAM" /proc/cmdline; then
+    say "ok   APST disabled in the running kernel ($CMDLINE_PARAM)"
+else
+    bad "$CMDLINE_PARAM is NOT in /proc/cmdline. NVMe power-state transitions"
+    more "are enabled; this machine is expected to hang. See docs/deck-boot.md."
+fi
+
+# --- 2. Will it still be active on the NEXT boot? ---------------------------
+# flash-kernel stages kernel updates by copying the LIVE slot's cmdline.txt
+# into a new slot (functions:1261, `cp current/cmdline.txt new/cmdline.txt`).
+# So the parameter propagates by itself — but only from whatever current/
+# holds at the moment the update runs. Checking /proc/cmdline alone would miss
+# a live-but-not-persisted state, which is exactly how a fix survives one
+# reboot and vanishes on the next.
+live_slot="$BOOT/current/cmdline.txt"
+if [ -r "$live_slot" ]; then
+    if grep -qF -- "$CMDLINE_PARAM" "$live_slot"; then
+        say "ok   $live_slot carries it forward to the next staged slot"
+    else
+        bad "$live_slot lacks $CMDLINE_PARAM."
+        more "The running kernel may be fine, but the next kernel update will"
+        more "copy this file into the new slot and the fix will be lost."
+    fi
+else
+    soso "cannot read $live_slot"
+fi
+
+# --- 3. Is a slot already staged? -------------------------------------------
+# The narrow race that actually bit on 2026-09-16. flash-kernel copies
+# cmdline.txt at STAGING time, not at reboot time. An edit made to current/
+# while new/ already exists never reaches new/, and the next reboot promotes
+# new/ over the edit. That is what made a working fix look like it had been
+# "dropped by the kernel update" — it was copied forward from a snapshot taken
+# 64 minutes before the edit existed.
+if [ -d "$BOOT/new" ]; then
+    if [ -r "$BOOT/new/cmdline.txt" ] \
+       && grep -qF -- "$CMDLINE_PARAM" "$BOOT/new/cmdline.txt"; then
+        say "ok   a kernel update is staged in new/ and it carries the parameter"
+    else
+        bad "a kernel update is staged in $BOOT/new/ WITHOUT $CMDLINE_PARAM."
+        more "Rebooting now would promote it and silently undo the fix."
+        more "Fix: add the parameter to $BOOT/new/cmdline.txt before rebooting."
+    fi
+else
+    say "ok   no kernel update staged"
+fi
+
+# --- 4. Has the drive logged anything since last boot? ----------------------
+# unsafe_shutdowns is the recurrence indicator for the APST fault: the
+# controller records nothing when commands never reach it, so a climbing count
+# with a zero error log is the signature. It should now move only on a
+# deliberate power pull.
+if command -v nvme >/dev/null 2>&1 && [ -e /dev/nvme0 ]; then
+    smart=$(nvme smart-log /dev/nvme0n1 2>/dev/null)
+    for k in unsafe_shutdowns media_errors num_err_log_entries; do
+        v=$(printf '%s\n' "$smart" | awk -F': *' -v k="$k" '$1 ~ k {print $2; exit}')
+        [ -n "${v:-}" ] && say "info nvme $k = $v"
+    done
+fi
+
+if [ "$fail" -gt 0 ]; then
+    echo "PREFLIGHT FAILED: $fail problem(s). This deck is not safe to leave running." >&2
+    [ "${RFSURVEY_PREFLIGHT_STRICT:-0}" = "1" ] && exit 1
+fi
+exit 0

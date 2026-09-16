@@ -11,6 +11,14 @@ Documentation=file:/home/firestarss/rfsurvey/docs/handoff.md
 # whether or not WiFi ever associates.
 After=local-fs.target
 
+# Ordering only, deliberately not Requires=. The preflight check reports boot
+# invariants (see systemd/rfsurvey-preflight); ordering after it guarantees its
+# verdict is already in the journal above the survey's first output, so anyone
+# reading back from a lockup sees the state of the machine before the data.
+# Making it a hard dependency would let a failed check stop the survey, which is
+# a deliberate choice documented in that unit and not the default.
+After=rfsurvey-preflight.service
+
 # Grouped under rfsurvey.target so both receivers start and stop as one unit.
 # PartOf, not just WantedBy, because that is what makes `systemctl stop
 # rfsurvey.target` propagate down to the instances.
