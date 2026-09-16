@@ -207,3 +207,95 @@ RTC battery, or a GPS time source.
 
 **Meanwhile, reboot with `sudo reboot`, never by pulling power** — a pull both
 misdates the next run and resets the journald experiment.
+
+---
+
+## The second fault: WiFi steering, not the drive (2026-09-16)
+
+The two lockups on 2026-09-16 at 06:43 and 08:15 happened **with APST already
+disabled**, and they were a different fault. The disk, journal and survey were
+fine throughout; what disappeared was the network.
+
+The router (SSID `MobiusStripClubSandwich`, BSSIDs `42:75:c3:fe:b7:f9` and
+`42:75:c3:05:b7:fa`) sends 802.11v BSS Transition Management requests every
+15–40 minutes, trying to move the Pi between its two radios. `brcmfmac` cannot
+handle the frame, and the Pi drops its link every time:
+
+```
+wpa_supplicant  wlan0: WNM: Preferred List Available
+kernel          brcmf_p2p_send_action_frame: Unknown Frame: category 0xa, action 0x8
+networkd        wlan0: Lost carrier / DHCP lease lost
+wpa_supplicant  CTRL-EVENT-DISCONNECTED ... reason=3 locally_generated=1
+```
+
+Sixteen drops across four boots that day. Most recover in ~17 s, some in ~1m45s.
+**The 06:43 one never recovered:** steered at 06:38:57, authentication to
+`05:b7:fa` timed out, the original AP then refused it back
+(`ASSOC-REJECT status_code=16`), it associated to `05:b7:fa` at 06:39:22 and
+**never got a DHCP lease** — link up, no address, until power was pulled four
+minutes later.
+
+**The survey does not care.** Straight through the 17:18–17:20 drops it held
+76.3 fps and zero overflows; it needs no network. A "lockup" of this kind is a
+loss of remote access, not a loss of data — whereas pulling power to clear it
+costs a run boundary, an unsafe shutdown, and (with no RTC battery) a misdated
+run.
+
+### Telling the two faults apart
+
+| | NVMe APST (fixed) | WiFi steering (open) |
+|---|---|---|
+| ping | answers | no response |
+| SSH | connects, stalls before banner | cannot connect |
+| journal | goes silent, often hours early | keeps writing to the end |
+| survey | keeps running | keeps running |
+| in the journal | nothing — it cannot write | `WNM` / `Lost carrier` |
+
+### Options, not yet chosen
+
+- **Ethernet.** `eth0` is already configured for DHCP (`optional: true`) and
+  unplugged. Removes the fault at home with no configuration at all.
+- **Turn off band steering / 802.11v for this device on the router.** Fixes it at
+  the source; does not travel with the deck.
+- **Pin the BSSID or band** in netplan (`bssid:` / `band:`). Stops the move;
+  the AP may still send requests or deauthenticate.
+- **`disable_btm=1` in wpa_supplicant.** The Pi ignores steering. Netplan does
+  not expose it, so it needs an override outside netplan.
+- **Connectivity watchdog:** a timer that checks the gateway and restarts
+  networking after several minutes down. Recovers the stuck-without-DHCP case
+  whatever caused it, including at a festival.
+
+**Until one is in place: when the deck is unreachable, wait five minutes before
+pulling power.** Most drops heal inside two.
+
+---
+
+## Timestamps: clock repair applied 2026-09-16
+
+Six runs recorded under a pre-NTP clock were corrected in `data/phase4.sqlite`
+(backup: `data/phase4.pre-clock-repair.sqlite`), using chrony's logged step for
+each boot:
+
+| run | events | offset applied (s) |
+|---|---|---|
+| 5 | 14,956 | 3,026,478.577405 |
+| 6 | 116,011 | 3,053,108.017635 |
+| 8 | 662 | 4,329,195.433300 |
+| 9 | 656 | 4,349,469.052112 |
+| 17 | 17,710 | 4,356,004.075303 |
+| 18 | 3,906 | 4,386,429.379779 |
+
+Chrony's figures were checked against the data before being used. Each run's
+journal `ended` lines (correct wall time after the step) were matched to its
+database `t_end` values, using only unambiguous matches and restricted to the
+run's own PID. Every repaired run's residual fell inside the range shown by
+correctly dated control runs, so the step accounts for the whole clock error.
+Values stamped after the step (`runs.ended_at`, a cleanly closed window's
+`t_end`) were left alone, and they now agree with the shifted event times to
+within 1–2 s.
+
+**A separate bug the calibration exposed, not yet fixed:** every event in every
+run, correctly dated or not, is stamped about **1.5–2 s early**. The control runs
+show journal-minus-`t_end` of +1.83 to +2.34 s, of which ~0.3 s is the detector's
+hang time. The likely cause is `window_t0` being taken at window open, before the
+linearity check reads samples that the event clock never counts. Unconfirmed.
