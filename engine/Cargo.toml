@@ -1,0 +1,19 @@
+[package]
+name = "rfsurvey-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Reader, channeliser and detector for the RF survey deck"
+
+[dependencies]
+rustfft = "6"
+num-complex = "0.4"
+serde_json = "1"
+memmap2 = "0.9"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

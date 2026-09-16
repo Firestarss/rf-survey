@@ -1,0 +1,192 @@
+# WildFire FALLBACK profile, 2026-09-16. Identical to festival.yaml except the
+# vhf receiver, which runs at 2.5 MSPS over five narrower windows so two radios
+# fit on the Pi under the Python engine. Used only if the Rust engine is not
+# validated before departure.
+
+# Festival deployment profile
+#
+# A profile answers "where am I and what do I care about." It is config, not code.
+# Fields the software cannot read (antenna, attenuator) are recorded anyway — six months
+# from now, "why is this run 10 dB down on that one" should be answered by this file
+# rather than by memory.
+#
+# Numeric underscores parse correctly under PyYAML (YAML 1.1). If this ever moves to a
+# YAML 1.2 parser, they become strings — drop them then.
+
+name: wildfire-fallback
+description: FRS, GMRS, Part 90 business, plus 2 m and 70 cm ham
+
+receivers:
+
+  uhf:
+    # Measured Phase 1, 2026-08-26. SoapySDR spells it lowercase and without the
+    # 0x that airspy_info prints; matching is case-insensitive and tolerates the
+    # prefix, verified against the hardware, so either form selects this radio.
+    # A serial that matches nothing is refused rather than opening whatever is
+    # attached — which is what makes addressing by serial worth doing.
+    serial: 637862dc2e4c6dd7
+    # Was parked on 466. Now rotating, because Phase 1 measured what attenuation
+    # each band needs and 446 turned out to belong here: 446 and 466 both want
+    # 4-5 dB, while 146 and 155 want 17-20 dB. Grouping by required attenuation
+    # rather than by "ham vs business" is what lets each radio have ONE correct
+    # pad. See docs/phase_log.md, Phase 1, per-band attenuation model.
+    mode: rotating
+    dwell_seconds: 60             # fallback; every window below sets its own
+    sample_rate: 10_000_000
+    windows:
+      # Dwell is deliberately lopsided. 466 is the band this survey exists for —
+      # all of FRS, GMRS and the UHF business pool — and 446 is a ham segment
+      # that is worth sampling rather than watching. Splitting the time evenly
+      # would halve coverage of the main band to gain little.
+      - {center_hz: 466_000_000, label: "FRS/GMRS/UHF business", dwell_seconds: 300}
+      - {center_hz: 446_000_000, label: "70cm ham", dwell_seconds: 60}
+    # MEASURED AND SET, 2026-08-27, with the 5 dB pad fitted. This is an overall
+    # 0-45 dB control filling LNA, then MIX, then VGA — not a 0-21 linearity
+    # control, whatever the Airspy documentation suggests.
+    #
+    # 42 is the LOWEST gain still linear on THIS antenna. It was 39 on the
+    # Nagoya NA-701; swapping to the Signal Stick moved it, because that antenna
+    # delivers less ambient noise here (13.1x the receiver's own against 17.3x)
+    # and so needs more gain to clear the converter's knee. padcal reads `edge`
+    # at 30 and 33 and `inconclusive` at 36 and 39; 42 and 45 read linear and
+    # both give the same +7.3 dB delta, because above the knee gain amplifies
+    # the receiver's noise and the antenna's equally.
+    #
+    # The lesson worth keeping: the working gain is a property of the antenna,
+    # not of the radio. Re-run tools/padcal.py after ANY antenna change.
+    #
+    # It does NOT avoid adjacent-channel splatter. Measured 2026-08-27: a
+    # handheld at 2-3 m peaking above ~62 dB SNR puts DCS-carrying skirts on the
+    # channels +/-25 kHz away at gain 39 and gain 42 alike. That is a received
+    # level threshold, not a gain one, and the fix has to be in analysis.
+    gain: 42
+    # Measured Phase 1, 2026-08-26, against three independent references: an FRS
+    # handheld across all 7 channels (-0.644), a licensed transmitter on exactly
+    # 464.000000 MHz (-0.65), and a tinySA Ultra generator (-0.41, the outlier —
+    # its own output is +0.21 ppm high, which is why three references and not one).
+    # Sign: POSITIVE means signals read low by this much, and this value corrects
+    # them. Verified on hardware — +0.64 moves a known carrier to within 96 Hz,
+    # -0.64 doubles the error to -576 Hz.
+    # Applied to the tune request, not via setFrequencyCorrection: SoapyAirspy
+    # reports hasFrequencyCorrection() == False and silently ignores it.
+    ppm: 0.64
+    # MEASURED AND FITTED, 5 dB. Phase 1 step 11, predicted 2026-08-26 and
+    # confirmed on hardware 2026-08-27 once the attenuator kit arrived:
+    # antenna-vs-dummy delta +8.0 to +8.3 dB across gains 39/42/45, against 8.1
+    # predicted, and external noise re-derived at 17.3x the receiver's own —
+    # the same figure Phase 1 fitted from the 20/10/0 dB configurations, so two
+    # independent measurements agree.
+    #
+    # Physically this is 2 dB + 3 dB stacked, not a single part. Phase 1 argued
+    # for one pad to halve the connector count; the kit does not contain a 5,
+    # so the stack stands. If a single 5 dB part is ever bought, it is a
+    # like-for-like swap and needs no re-measurement.
+    #
+    # Do NOT lower gain below 39 to buy headroom: 30 and 33 measure `edge` and
+    # 36 `inconclusive` on this chain, i.e. below the converter's noise knee.
+    # 39 is the lowest honest gain now that only 5 dB is fitted.
+    attenuator_db: 5
+    # Signal Stick, fitted 2026-08-27, replacing the Nagoya NA-701 which left
+    # with the operator. Recorded because it is not a cosmetic detail: it moved
+    # the lowest usable gain from 39 to 42 and the external-noise ratio from
+    # 17.3x to 13.1x, both measured the same evening on the same radio and pad.
+    antenna: "Signal Stick"
+
+    # What the floor reads at `gain` above with the antenna REMOVED and a 50 ohm
+    # terminator fitted — measured 2026-08-27. Used only to warn: a dummy load
+    # and a very quiet band look identical to the deck, and on 2026-08-27 a
+    # multi-day unattended run was started into a terminator left on after a
+    # padcal sweep. Valid only at the gain it was measured at; a --gain override
+    # skips the check.
+    dummy_floor_dbfs: -112.4
+    dummy_floor_gain: 42
+    usb_bus: 4                    # Bus 004 Port 1, xhci-hcd, 480M. vhf must not
+                                  # land on this one — confirm with lsusb -t
+
+  vhf:
+    # Read off the device 2026-08-27, both radios attached. Note how little it
+    # differs from uhf's 637862dc2e4c6dd7 — they diverge only in the last five
+    # characters, so check the whole string, never the prefix.
+    serial: 637862dc2f2f31d7
+    mode: rotating
+    dwell_seconds: 180
+    # 2.5 MSPS, not 10: the WildFire FALLBACK. Two receivers at 10 MSPS measured
+    # 2,177 and 1,899 overflows in 6.5 minutes on 2026-09-16 under the Python
+    # engine. uhf stays at 10 MSPS so the whole UHF business band is watched
+    # continuously; vhf covers the same ground in narrower slices.
+    sample_rate: 2_500_000
+    # PROVISIONAL, set 2026-09-16 for the WildFire test run without a padcal
+    # measurement on this chain. 12 is below the converter's noise knee on these
+    # radios (Phase 1: inconclusive below ~36, linear from 39 on UHF), so it
+    # would have heard almost nothing. 42 clears the knee with margin, and is the
+    # value both UHF antennas measured linear at. The risk at VHF is compression
+    # rather than deafness — Phase 1 saw 146 MHz compress above 39 with NO pad —
+    # and this chain carries 20 dB, which moves that point up by the same 20 dB.
+    # Every window records a linearity verdict, so if 42 compresses at WildFire
+    # it will say so in coverage_windows.gain_linear rather than fail silently.
+    # Replace with a padcal measurement: tools/padcal.py --serial 637862dc2f2f31d7
+    #   --freq 146.0e6 --pad 20
+    gain: 42
+    # Unmeasured. At 146-155 MHz a 1 ppm error is ~150 Hz against 12.5-25 kHz
+    # channels, so it cannot misplace an event; it can be measured afterwards
+    # from freq_raw_hz on any known transmitter (146.520 simplex, MURS).
+    ppm: 0.0
+    # MEASURED TARGET 20 dB, and unlike uhf this one is right. Phase 1, 2026-08-26:
+    # 146 MHz needs 17-19 dB (external noise 467x the receiver's own) and 155 MHz
+    # could not be measured at all because a paging transmitter at 152.600 MHz,
+    # +55.4 dB, drives the front end into compression intermittently.
+    #
+    # RESOLVED 2026-08-26 by moving 446 to the uhf receiver. This was previously
+    # unsatisfiable: three windows wanting 18, 20 and 4 dB cannot share one pad.
+    # 20 dB would have over-attenuated 446 by 16 dB and lost weak 70 cm signals;
+    # less would have compressed 146 and 155, which fails silently - clipping
+    # frames read zero right through compression. Both remaining windows want
+    # 17-20 dB, so one pad now serves them.
+    attenuator_db: 20
+    # Chain for WildFire, 2026-09-16: antenna -> Flamingo FM notch -> 10 dB -> 10 dB
+    # -> this Airspy. The only Flamingo moved here from uhf: 146/155 MHz sit far
+    # closer to the 88-108 MHz broadcast band, and Phase 1 found VHF compressing,
+    # whereas on UHF the filter measured 0.1 dB.
+    antenna: null                 # record which one on site
+    usb_bus: 2                    # Bus 002 Port 1, xhci-hcd, 480M. Confirmed
+                                  # 2026-08-27 to be a different root hub from
+                                  # uhf's bus 4, with no undervoltage alarm
+                                  # (in0_lcrit_alarm = 0) with both attached.
+    windows:
+      # ~2.2 MHz usable each. Together these cover everything the single 10 MSPS
+      # 154.95 window did — 2 m, all five MURS channels and VHF business up to the
+      # 158.400 itinerant — visited in turn rather than watched at once.
+      - {center_hz: 146_000_000, label: "2m ham", dwell_seconds: 72}
+      - {center_hz: 151_900_000, label: "MURS 1-3 + VHF business", dwell_seconds: 72}
+      - {center_hz: 154_100_000, label: "MURS 4-5 + VHF business", dwell_seconds: 72}
+      - {center_hz: 156_300_000, label: "VHF business", dwell_seconds: 72}
+      - {center_hz: 158_100_000, label: "VHF business incl. 158.400", dwell_seconds: 72}
+
+# Thresholds below are set from synthetic signals and are provisional.
+# Do not tune them until there are real signals to tune against.
+detection:
+  on_db: 10.0
+  off_db: 6.0
+  min_duration_s: 0.12
+  hang_s: 0.30
+
+storage:
+  db_path: data/survey.sqlite
+  audio_retention_days: 30
+  iq_retention_days: 7          # largest and least valuable — delete first
+  spectrum_retention_days: 90
+  metadata_retention_days: null # never delete
+
+# Known gap, deliberately accepted for now: the 451.800/456.800 itinerant repeater
+# pair falls outside every window above. Reaching it needs a fourth rotation window
+# near 454 MHz, which costs dwell time on the three that exist. Revisit after the
+# first real deployment shows whether that band is busy.
+
+# Which services you may legally transmit on. Drives tier 4 — a channel you cannot
+# key up on is not "contactable" however completely it has been characterised.
+# Unlicensed services (FRS, MURS) always count and need not be listed here.
+# Valid names match band_plan.service: ham2m, ham70cm, gmrs, part90.
+# FRS needs no licence — it is licensed by rule — so it is never listed here and
+# always counts. Only services requiring a licence go in this list.
+operator:
+  licences: [gmrs, ham2m, ham70cm]
